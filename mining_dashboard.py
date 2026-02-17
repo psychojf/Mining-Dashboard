@@ -11,10 +11,10 @@ import time
 
 # Conditional imports
 try:
-    import winsound
-    HAS_WINSOUND = True
+    from playsound import playsound
+    HAS_PLAYSOUND = True
 except ImportError:
-    HAS_WINSOUND = False
+    HAS_PLAYSOUND = False
 
 try:
     from plyer import notification
@@ -179,16 +179,11 @@ COMPRESSION_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# Character detection patterns
-CHAR_ID_FILENAME = re.compile(r'^\d{8}_\d{6}_(\d+)\.txt$')
+# Character detection patterns (split on '_', char ID is 3rd segment)
 LISTENER_LINE = re.compile(r'Listener:\s*(.+)', re.IGNORECASE)
 
 # Timestamp pattern for date extraction from log lines
 LOG_TIMESTAMP = re.compile(r'^\[\s*(\d{4}\.\d{2}\.\d{2})\s+\d{2}:\d{2}:\d{2}\s*\]')
-
-# Auto-stop patterns (cargo full / asteroid depleted)
-CARGO_FULL_PATTERN = re.compile(r'\(notify\).*cargo hold is full', re.IGNORECASE)
-ASTEROID_DEPLETED_PATTERN = re.compile(r'\(notify\).*pale shadow of its former glory', re.IGNORECASE)
 
 # --- ORE CATEGORY COLORS FOR EXCEL ---
 # Maps ore base name to a hex color for Excel styling
@@ -283,7 +278,6 @@ class CharacterTracker:
         self.session_start_time: float = time.time()
         self.session_start_m3: float = 0.0
         self.session_active: bool = False
-        self.session_stop_reason: Optional[str] = None
 
     def get_active_modules(self) -> List[MiningModule]:
         # Get the modules for the currently active profile
@@ -483,15 +477,25 @@ class MiningDashboard:
         self.root.geometry("")
 
     def _get_all_log_files(self) -> List[str]:
-        main_files = glob.glob(DOCS)
-        old_pattern = os.path.join(os.path.dirname(DOCS.rstrip('*')), "OLD", "*")
+        # Ensure DOCS ends with wildcard for glob
+        pattern = DOCS.rstrip('\\').rstrip('/')
+        if not pattern.endswith('*'):
+            pattern = os.path.join(pattern, '*')
+        main_files = glob.glob(pattern)
+        old_pattern = os.path.join(os.path.dirname(pattern.rstrip('*').rstrip('\\').rstrip('/')), "OLD", "*")
         old_files = glob.glob(old_pattern)
         return [f for f in main_files + old_files if f.lower().endswith('.txt')]
 
     @staticmethod
     def _get_char_id_from_file(filepath: str) -> Optional[str]:
-        match = CHAR_ID_FILENAME.match(os.path.basename(filepath))
-        return match.group(1) if match else None
+        # Split filename on '_' and check after the second underscore
+        basename = os.path.splitext(os.path.basename(filepath))[0]
+        parts = basename.split('_')
+        if len(parts) >= 3:
+            char_id = parts[2]
+            if char_id.isdigit():
+                return char_id
+        return None
 
     @staticmethod
     def _read_listener_name(filepath: str) -> Optional[str]:
@@ -511,7 +515,11 @@ class MiningDashboard:
         # Return cached glob results, refresh only after TTL expires
         now = time.time()
         if now - self._glob_cache_time > self._glob_cache_ttl:
-            self._glob_cache = [f for f in glob.glob(DOCS) if f.lower().endswith('.txt')]
+            # Ensure DOCS ends with wildcard for glob
+            pattern = DOCS.rstrip('\\').rstrip('/')
+            if not pattern.endswith('*'):
+                pattern = os.path.join(pattern, '*')
+            self._glob_cache = [f for f in glob.glob(pattern) if f.lower().endswith('.txt')]
             self._glob_cache_time = now
         return self._glob_cache
 
@@ -805,8 +813,7 @@ class MiningDashboard:
             'actual': actual_label,
             'start_stop_btn': start_stop_btn,
             'ship_indicator': ship_indicator,
-            'profile_label': profile_label,
-            'accent_color': accent_color
+            'profile_label': profile_label
         }
 
         return col_outer, widgets
@@ -1863,10 +1870,7 @@ class MiningDashboard:
                         new_data = f.read()
                         new_pos = f.tell()
                         if new_data:
-                            stop_reason = self._process_log_data(tracker, new_data)
-                            # Auto-stop session if cargo full or asteroid depleted
-                            if stop_reason and tracker.session_active:
-                                self._auto_stop_session(char_id, stop_reason)
+                            self._process_log_data(tracker, new_data)
                         # Only advance log_pos when session is active
                         # so events during inactive period are preserved
                         if tracker.session_active:
@@ -1877,14 +1881,12 @@ class MiningDashboard:
         self._update_ui_labels()
         self.root.after(UPDATE_INTERVAL_MS, self.update_loop)
 
-    def _process_log_data(self, tracker: CharacterTracker, data: str) -> Optional[str]:
+    def _process_log_data(self, tracker: CharacterTracker, data: str) -> None:
         # log processing with compression tracking
-        # Returns a stop reason string if an auto-stop event was detected, else None
         if not tracker.session_active:
-            return None
+            return
 
         crit_processed = False
-        stop_reason = None
         
         for line in data.splitlines():
             # Check for compression events
@@ -1900,14 +1902,6 @@ class MiningDashboard:
                 total_volume = original_units * volume_per_unit
                 
                 tracker.compression_log[ore_name] = tracker.compression_log.get(ore_name, 0) + total_volume
-                continue
-
-            # Check for auto-stop events (cargo full / asteroid depleted)
-            if CARGO_FULL_PATTERN.search(line):
-                stop_reason = "cargo_full"
-                continue
-            if ASTEROID_DEPLETED_PATTERN.search(line):
-                stop_reason = "depleted"
                 continue
             
             # OPTIMIZATION: Fast check - skip if not a mining line
@@ -1937,8 +1931,6 @@ class MiningDashboard:
                     tracker.crit_count += 1
                     crit_processed = True
                     self.trigger_crit_alert()
-
-        return stop_reason
 
     def _update_ui_labels(self) -> None:
         for char_id, tracker in self.characters.items():
@@ -1971,62 +1963,9 @@ class MiningDashboard:
             except Exception:
                 pass
 
-        if HAS_WINSOUND and os.path.exists(CRIT_SOUND_FILE):
+        if HAS_PLAYSOUND and os.path.exists(CRIT_SOUND_FILE):
             try:
-                winsound.PlaySound(CRIT_SOUND_FILE, winsound.SND_FILENAME | winsound.SND_ASYNC)
-            except Exception:
-                pass
-
-    # ===================== #
-    #   AUTO-STOP SESSION  #
-    # ===================== #
-
-    def _auto_stop_session(self, char_id: str, reason: str) -> None:
-        # Auto-stop a character's session when cargo full or asteroid depleted
-        tracker = self.all_characters[char_id]
-        if not tracker.session_active:
-            return
-
-        widgets = self.char_widgets.get(char_id)
-        if not widgets:
-            return
-
-        # Compute final rate before stopping
-        session_duration = time.time() - tracker.session_start_time
-        session_m3 = tracker.total_m3 - tracker.session_start_m3
-        final_rate = 0.0
-        if session_duration > 10 and session_m3 > 0:
-            final_rate = session_m3 / session_duration
-
-        # Stop the session
-        tracker.session_active = False
-        tracker.session_stop_reason = reason
-
-        # Update UI
-        if reason == "cargo_full":
-            reason_label = "\u26d4 CARGO FULL"
-            notify_msg = f"{tracker.char_name} \u2014 Cargo Full \u2014 Session Stopped"
-        else:
-            reason_label = "\u26d4 ROCK DEPLETED"
-            notify_msg = f"{tracker.char_name} \u2014 Asteroid Depleted \u2014 Session Stopped"
-
-        widgets['start_stop_btn'].config(text="\u25b6 START", fg=GOLD)
-        widgets['actual'].config(
-            text=f"\u25c9 Actual: {final_rate:.2f} m3/s ({final_rate * 3600:,.0f} m3/hr) \u2500 {reason_label}",
-            fg=GOLD
-        )
-
-        # Desktop notification
-        if HAS_NOTIFICATION:
-            try:
-                notification.notify(title="MINING", message=notify_msg, timeout=3)
-            except Exception:
-                pass
-
-        # Sound alert (same as crit to get attention)
-        if HAS_WINSOUND and os.path.exists(CRIT_SOUND_FILE):
-            try:
-                winsound.PlaySound(CRIT_SOUND_FILE, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                playsound(CRIT_SOUND_FILE, block=False)
             except Exception:
                 pass
 
@@ -2041,10 +1980,6 @@ class MiningDashboard:
         tracker.session_active = not tracker.session_active
 
         if tracker.session_active:
-            # Clear any auto-stop reason and restore label color
-            tracker.session_stop_reason = None
-            widgets['actual'].config(fg=widgets['accent_color'])
-
             # Process any backlog data accumulated while session was stopped
             # so crits/ore from the inactive period are not lost
             if tracker.log_path and os.path.exists(tracker.log_path):
@@ -2074,8 +2009,9 @@ class MiningDashboard:
         tracker = self.all_characters[char_id]
         widgets = self.char_widgets[char_id]
 
-        tracker.session_active = False
-        widgets['start_stop_btn'].config(text="▶ START", fg=GREEN)
+        if tracker.session_active:
+            tracker.session_active = False
+            widgets['start_stop_btn'].config(text="▶ START", fg=GREEN)
 
         tracker.crit_count = 0
         tracker.total_m3 = 0.0
@@ -2083,12 +2019,11 @@ class MiningDashboard:
         tracker.compression_log = {}
         tracker.session_start_time = time.time()
         tracker.session_start_m3 = 0.0
-        tracker.session_stop_reason = None
 
         widgets['crit'].config(text="Crits: 0")
         widgets['ore'].config(text="Total: 0.0 m3")
         widgets['summary'].config(text="Waiting...")
-        widgets['actual'].config(text="◉ Actual: -- m3/s", fg=widgets['accent_color'])
+        widgets['actual'].config(text="◉ Actual: -- m3/s")
 
     # ===================== #
     #     SHIP CONFIG      #
