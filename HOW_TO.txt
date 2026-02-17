@@ -1,0 +1,111 @@
+﻿## How to Use
+
+
+### Managing Characters
+
+
+Your characters will be detected automatically from existing game logs.
+Click the **gear icon** in the top-right corner to open the Config dialog.
+
+
+- Check or uncheck characters to show or hide them on the dashboard.
+- Adjust the **Gamelogs Path** if your EVE logs are in a non-default location.
+- Set the **Update Interval** (how often the dashboard reads new log data, minimum 250 ms).
+- Set the **Default History Days** for the history window.
+
+
+### Configuring Ship Fittings
+
+
+from the MAIN ui, right-click on a character's column and select **Ship Config** to open the fitting dialog.
+
+
+- **Profiles**: Create multiple ship profiles (e.g. one for ore mining, one for ice, one for gas). Use the dropdown to switch between them.
+- **Modules**: Configure up to 5 mining modules per profile. For each module, enter:
+  - **Module Name** -- a label for your reference (e.g. "Strip Miner I")
+  - **Yield (m3/cycle)** -- the m3 your module extracts per cycle (check your fitting window in EVE)
+  - **Cycle Time (s)** -- the duration of one mining cycle in seconds
+- **Enable/Disable**: Use the checkboxes to toggle individual modules on or off.
+- The **Theoretical rate** preview updates live as you adjust values.
+- Click **SAVE** to apply. The dashboard will now show theoretical m3/s and compare it to your actual mining rate during active sessions.
+
+
+### Start monitoring
+
+
+1. after setting up the "ship fitting" and the character you want to see on the Dashboard you are ready...
+2. Click **START** under a character's column to begin tracking that session.
+3. Mine as usual in EVE -- stats update in real time.
+4. Click **STOP** to pause tracking, or **RESET** to clear all stats for that character.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Viewing Mining History
+
+
+Click the **HISTORY** button at the bottom of the dashboard.
+
+
+- Enter the number of days to analyze and press Enter or click **REFRESH STATS**.
+- The history window shows total m3 mined per character with a per-ore breakdown.
+- Data is read from all game log files within the selected time range.
+
+
+## Configuration File
+
+
+Settings are saved automatically to `mining_config.json` in the same folder as the script. This includes:
+
+
+- Window positions (dashboard, history, ship config dialogs)
+- Character visibility selections
+- All ship profiles and module configurations
+- Application settings (paths, intervals, etc.)
+
+
+Delete this file to reset everything to defaults.
+
+
+## Supported Ore Types
+
+
+The dashboard recognizes all major EVE ore categories including their grade variants (II-Grade, III-Grade, IV-Grade):
+
+
+- **Standard ores**: Veldspar, Scordite, Pyroxeres, Plagioclase, Omber, Kernite
+- **Low-sec ores**: Jaspet, Hemorphite, Hedbergite
+- **Null-sec ores**: Gneiss, Dark Ochre, Spodumain, Crokite, Bistot, Arkonor, Mercoxit
+- **Moon ores**: R4 through R64 (Zeolites, Cobaltite, Otavite, Carnotite, Xenotime, etc.)
+- **Ice**: Blue Ice, Clear Icicle, Glacial Mass, White Glaze, and others
+- **Pochven ores**: Bezdnacine, Rakovene, Talassonite
+- **Gas clouds**: All Cytoserocin, Mykoserocin, and Fullerite variants
+- **Special ores**: Ueganite, Prismaticite, Ducinium
+
+
+## Tips
+
+
+- The dashboard window is **draggable** -- click and drag anywhere on the background.
+- The overlay is semi-transparent (85% opacity) by default.
+- If a character's ship indicator diamond is **green**, at least one module is configured. **Red** means no modules are set up yet.
+- The active profile name is shown in angle brackets next to each character's name.
+- All window positions are saved between sessions.
+
+
+## Troubleshooting
+
+
+- **No characters detected**: Make sure EVE has been launched at least once and game logs exist in the Gamelogs folder. Check the path in Config if using a custom location.
+- **Stats not updating**: Ensure the session is started (button should say "STOP"). The dashboard only tracks mining events while a session is active.
+- **No sound on critical hits**: Be sure `alert_crit.wav` file in the same folder as the script. if not you can basicly put any wav file there as long as the name stil is "alert_crit.wav"

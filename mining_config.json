@@ -1,0 +1,303 @@
+{
+  "win_geom": "343x346+885+171",
+  "history_win_geom": "357x485+1291+161",
+  "mirror_bbox": {
+    "top": 384,
+    "left": 639,
+    "width": 27,
+    "height": 975
+  },
+  "mirror_geom": "251x219+1502+473",
+  "ship_configs": {
+    "567378426": {
+      "active_profile": "Hulk ORE",
+      "profiles": {
+        "Outrider ORE": {
+          "modules": [
+            {
+              "name": "Miner II",
+              "yield_per_cycle": 46.94,
+              "cycle_time": 10.4,
+              "enabled": true
+            },
+            {
+              "name": "Miner II",
+              "yield_per_cycle": 46.94,
+              "cycle_time": 10.4,
+              "enabled": true
+            },
+            {
+              "name": "Miner II",
+              "yield_per_cycle": 46.94,
+              "cycle_time": 10.4,
+              "enabled": true
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            }
+          ]
+        },
+        "Hulk ORE": {
+          "modules": [
+            {
+              "name": "strip miner",
+              "yield_per_cycle": 635.27,
+              "cycle_time": 12.5,
+              "enabled": true
+            },
+            {
+              "name": "strip miner",
+              "yield_per_cycle": 635.27,
+              "cycle_time": 12.5,
+              "enabled": true
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            }
+          ]
+        },
+        "Odysseus GAS": {
+          "modules": [
+            {
+              "name": "syndicate",
+              "yield_per_cycle": 20.0,
+              "cycle_time": 25.5,
+              "enabled": true
+            },
+            {
+              "name": "syndicate",
+              "yield_per_cycle": 20.0,
+              "cycle_time": 25.5,
+              "enabled": true
+            },
+            {
+              "name": "syndicate",
+              "yield_per_cycle": 20.0,
+              "cycle_time": 25.5,
+              "enabled": true
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            }
+          ]
+        },
+        "Prospect GAS": {
+          "modules": [
+            {
+              "name": "Gas cloud II",
+              "yield_per_cycle": 40.0,
+              "cycle_time": 30.0,
+              "enabled": true
+            },
+            {
+              "name": "Gas cloud II",
+              "yield_per_cycle": 40.0,
+              "cycle_time": 30.0,
+              "enabled": true
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            }
+          ]
+        },
+        "Hulk ICE": {
+          "modules": [
+            {
+              "name": "Ore ICE",
+              "yield_per_cycle": 1000.0,
+              "cycle_time": 47.3,
+              "enabled": true
+            },
+            {
+              "name": "Ore ICE",
+              "yield_per_cycle": 1000.0,
+              "cycle_time": 47.3,
+              "enabled": true
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            }
+          ]
+        },
+        "Hulk MERC": {
+          "modules": [
+            {
+              "name": "deep core",
+              "yield_per_cycle": 422.46,
+              "cycle_time": 32.5,
+              "enabled": true
+            },
+            {
+              "name": "deep core",
+              "yield_per_cycle": 422.46,
+              "cycle_time": 32.5,
+              "enabled": true
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            }
+          ]
+        }
+      }
+    },
+    "96882276": {
+      "active_profile": "Outrider ORE",
+      "profiles": {
+        "Outrider ORE": {
+          "modules": [
+            {
+              "name": "Miner II",
+              "yield_per_cycle": 52.0,
+              "cycle_time": 15.0,
+              "enabled": true
+            },
+            {
+              "name": "Miner II",
+              "yield_per_cycle": 52.0,
+              "cycle_time": 15.0,
+              "enabled": true
+            },
+            {
+              "name": "Miner II",
+              "yield_per_cycle": 52.0,
+              "cycle_time": 15.0,
+              "enabled": true
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            }
+          ]
+        }
+      }
+    },
+    "2122195947": {
+      "active_profile": "Default",
+      "profiles": {
+        "Default": {
+          "modules": [
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            },
+            {
+              "name": "",
+              "yield_per_cycle": 0.0,
+              "cycle_time": 0.0,
+              "enabled": false
+            }
+          ]
+        }
+      }
+    }
+  },
+  "ship_config_567378426_geom": "+1256+150",
+  "ship_config_96882276_geom": "+1336+588",
+  "config_dialog_geom": "+1244+294",
+  "app_settings": {
+    "docs_path": "C:\\Users\\JFGel\\Documents\\EVE\\logs\\Gamelogs\\*",
+    "crit_sound_file": "alert_crit.wav",
+    "update_interval_ms": 1000,
+    "history_days": 60,
+    "max_modules": 5
+  },
+  "char_select_dialog_geom": "+520+204",
+  "visible_characters": [
+    "567378426"
+  ],
+  "ship_config_2122195947_geom": "+1619+710"
+}
