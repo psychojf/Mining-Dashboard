@@ -306,6 +306,10 @@ class CharacterTracker:
         self.ship_profiles: Dict[str, List[MiningModule]] = {"Default": []}
         # Drone config per profile
         self.drone_profiles: Dict[str, MiningDrone] = {"Default": MiningDrone()}
+        # Implant config per profile (Highwall MX-1005 = +5% mining yield on modules only)
+        self.implant_profiles: Dict[str, bool] = {"Default": False}
+        # Crit config per profile (chance % and bonus yield %)
+        self.crit_profiles: Dict[str, Dict[str, float]] = {"Default": {"chance": 0.0, "bonus": 0.0}}
         self.active_profile: str = "Default"
         
         self.session_start_time: float = time.time()
@@ -328,12 +332,37 @@ class CharacterTracker:
         # Set drone config for the currently active profile
         self.drone_profiles[self.active_profile] = drone
 
+    def get_active_implant(self) -> bool:
+        # Get Highwall implant state for the currently active profile
+        return self.implant_profiles.get(self.active_profile, False)
+
+    def set_active_implant(self, enabled: bool):
+        # Set Highwall implant state for the currently active profile
+        self.implant_profiles[self.active_profile] = enabled
+
+    def get_active_crit(self) -> Dict[str, float]:
+        # Get crit config for the currently active profile
+        return self.crit_profiles.get(self.active_profile, {"chance": 0.0, "bonus": 0.0})
+
+    def set_active_crit(self, chance: float, bonus: float):
+        # Set crit config for the currently active profile
+        self.crit_profiles[self.active_profile] = {"chance": chance, "bonus": bonus}
+
     def get_total_theoretical_m3_per_sec(self) -> float:
         total = 0.0
+        module_total = 0.0
         for module in self.get_active_modules():
             if module.enabled and module.is_configured():
-                total += module.get_m3_per_sec()
-        # Add drone contribution
+                module_total += module.get_m3_per_sec()
+        # Apply Highwall MX-1005 implant bonus (+5%) to modules only
+        if self.get_active_implant():
+            module_total *= 1.05
+        # Apply critical hit average yield to modules only
+        crit = self.get_active_crit()
+        if crit["chance"] > 0 and crit["bonus"] > 0:
+            module_total *= (1 + (crit["chance"] / 100.0) * (crit["bonus"] / 100.0))
+        total += module_total
+        # Add drone contribution (not affected by implant or crits)
         drone = self.get_active_drones()
         if drone.is_configured():
             total += drone.get_total_m3_per_sec()
@@ -356,6 +385,8 @@ class CharacterTracker:
         if name and name not in self.ship_profiles:
             self.ship_profiles[name] = []
             self.drone_profiles[name] = MiningDrone()
+            self.implant_profiles[name] = False
+            self.crit_profiles[name] = {"chance": 0.0, "bonus": 0.0}
             return True
         return False
 
@@ -371,6 +402,10 @@ class CharacterTracker:
             del self.ship_profiles[name]
             if name in self.drone_profiles:
                 del self.drone_profiles[name]
+            if name in self.implant_profiles:
+                del self.implant_profiles[name]
+            if name in self.crit_profiles:
+                del self.crit_profiles[name]
             return True
         return False
 
@@ -380,6 +415,10 @@ class CharacterTracker:
             self.ship_profiles[new_name] = self.ship_profiles.pop(old_name)
             if old_name in self.drone_profiles:
                 self.drone_profiles[new_name] = self.drone_profiles.pop(old_name)
+            if old_name in self.implant_profiles:
+                self.implant_profiles[new_name] = self.implant_profiles.pop(old_name)
+            if old_name in self.crit_profiles:
+                self.crit_profiles[new_name] = self.crit_profiles.pop(old_name)
             if self.active_profile == old_name:
                 self.active_profile = new_name
             return True
@@ -2088,6 +2127,8 @@ class MiningDashboard:
                 if "profiles" in cfg:
                     tracker.ship_profiles = {}
                     tracker.drone_profiles = {}
+                    tracker.implant_profiles = {}
+                    tracker.crit_profiles = {}
                     for profile_name, profile_data in cfg["profiles"].items():
                         modules = []
                         for mod_data in profile_data.get("modules", []):
@@ -2100,6 +2141,15 @@ class MiningDashboard:
                             tracker.drone_profiles[profile_name] = MiningDrone.from_dict(drone_data)
                         else:
                             tracker.drone_profiles[profile_name] = MiningDrone()
+                        
+                        # Load implant config for this profile
+                        tracker.implant_profiles[profile_name] = profile_data.get("highwall_implant", False)
+                        
+                        # Load crit config for this profile
+                        tracker.crit_profiles[profile_name] = {
+                            "chance": profile_data.get("crit_chance", 0.0),
+                            "bonus": profile_data.get("crit_bonus", 0.0)
+                        }
                     
                     tracker.active_profile = cfg.get("active_profile", "Default")
                     
@@ -2111,6 +2161,8 @@ class MiningDashboard:
                             tracker.active_profile = "Default"
                             tracker.ship_profiles["Default"] = []
                             tracker.drone_profiles["Default"] = MiningDrone()
+                            tracker.implant_profiles["Default"] = False
+                            tracker.crit_profiles["Default"] = {"chance": 0.0, "bonus": 0.0}
                 
                 elif "modules" in cfg:
                     modules_data = cfg.get("modules", [])
@@ -2119,6 +2171,8 @@ class MiningDashboard:
                         modules.append(MiningModule.from_dict(mod_data))
                     tracker.ship_profiles = {"Default": modules}
                     tracker.drone_profiles = {"Default": MiningDrone()}
+                    tracker.implant_profiles = {"Default": False}
+                    tracker.crit_profiles = {"Default": {"chance": 0.0, "bonus": 0.0}}
                     tracker.active_profile = "Default"
                 
                 # yield/cycle
@@ -2134,6 +2188,8 @@ class MiningDashboard:
                         )
                         tracker.ship_profiles = {"Default": [module]}
                         tracker.drone_profiles = {"Default": MiningDrone()}
+                        tracker.implant_profiles = {"Default": False}
+                        tracker.crit_profiles = {"Default": {"chance": 0.0, "bonus": 0.0}}
                         tracker.active_profile = "Default"
 
     def save_ship_configs(self):
@@ -2143,9 +2199,14 @@ class MiningDashboard:
             profiles_data = {}
             for profile_name, modules in tracker.ship_profiles.items():
                 drone = tracker.drone_profiles.get(profile_name, MiningDrone())
+                implant = tracker.implant_profiles.get(profile_name, False)
+                crit = tracker.crit_profiles.get(profile_name, {"chance": 0.0, "bonus": 0.0})
                 profiles_data[profile_name] = {
                     "modules": [m.to_dict() for m in modules],
-                    "drones": drone.to_dict()
+                    "drones": drone.to_dict(),
+                    "highwall_implant": implant,
+                    "crit_chance": crit.get("chance", 0.0),
+                    "crit_bonus": crit.get("bonus", 0.0)
                 }
             
             ship_configs[char_id] = {
@@ -2285,7 +2346,7 @@ class MiningDashboard:
         btn_new = tk.Button(
             profile_frame,
             text="+ NEW",
-            command=lambda: self.create_new_profile(tracker, current_profile, profile_menu, module_vars, update_preview, dialog, drone_vars),
+            command=lambda: self.create_new_profile(tracker, current_profile, profile_menu, module_vars, update_preview, dialog, drone_vars, implant_var, crit_vars),
             bg=BG,
             fg=GREEN,
             font=("Consolas", 8, "bold"),
@@ -2311,7 +2372,7 @@ class MiningDashboard:
         btn_delete = tk.Button(
             profile_frame,
             text="✕ DELETE",
-            command=lambda: self.delete_current_profile(tracker, current_profile, profile_menu, module_vars, update_preview, dialog, drone_vars),
+            command=lambda: self.delete_current_profile(tracker, current_profile, profile_menu, module_vars, update_preview, dialog, drone_vars, implant_var, crit_vars),
             bg=BG,
             fg=RED,
             font=("Consolas", 8, "bold"),
@@ -2363,6 +2424,14 @@ class MiningDashboard:
             drone_vars['count'].set(str(drone.count) if drone.count > 0 else "")
             drone_vars['yield'].set(str(drone.yield_per_cycle) if drone.yield_per_cycle > 0 else "")
             drone_vars['cycle'].set(str(drone.cycle_time) if drone.cycle_time > 0 else "")
+            
+            # Load implant state
+            implant_var.set(tracker.implant_profiles.get(profile_name, False))
+            
+            # Load crit config
+            crit = tracker.crit_profiles.get(profile_name, {"chance": 0.0, "bonus": 0.0})
+            crit_vars['chance'].set(str(crit["chance"]) if crit["chance"] > 0 else "")
+            crit_vars['bonus'].set(str(crit["bonus"]) if crit["bonus"] > 0 else "")
             
             update_preview()
 
@@ -2523,7 +2592,113 @@ class MiningDashboard:
             'cycle': drone_cycle_var
         }
 
-        preview_row = drone_row + 3
+        # ========================= #
+        #      MINING IMPLANT      #
+        # ========================= #
+
+        implant_row = drone_row + 3
+
+        implant_label = tk.Label(
+            main_frame,
+            text="◆ MINING IMPLANT",
+            fg=CYAN,
+            bg=BG_PANEL,
+            font=("Consolas", 9, "bold")
+        )
+        implant_label.grid(row=implant_row, column=0, columnspan=4, sticky="w", pady=(15, 5))
+
+        implant_cb_row = implant_row + 1
+        implant_var = tk.BooleanVar(value=tracker.get_active_implant())
+
+        implant_cb = tk.Checkbutton(
+            main_frame,
+            variable=implant_var,
+            bg=BG_PANEL,
+            activebackground=BG_PANEL,
+            selectcolor=WHITE,
+            highlightthickness=0
+        )
+        implant_cb.grid(row=implant_cb_row, column=0, sticky="e", padx=(0, 0), pady=3)
+
+        implant_text = tk.Label(
+            main_frame,
+            text="Highwall MX-1005",
+            fg=WHITE,
+            bg=BG_PANEL,
+            font=("Consolas", 9)
+        )
+        implant_text.grid(row=implant_cb_row, column=1, sticky="w", padx=(0, 5), pady=3)
+
+        implant_note = tk.Label(
+            main_frame,
+            text="+5% mining yield (modules only)",
+            fg=GOLD,
+            bg=BG_PANEL,
+            font=("Consolas", 8)
+        )
+        implant_note.grid(row=implant_cb_row, column=2, columnspan=2, sticky="w", padx=5, pady=3)
+
+        preview_row = implant_cb_row + 1
+
+        # ========================= #
+        #     CRITICAL HITS AVG    #
+        # ========================= #
+
+        crit_section_row = preview_row
+
+        crit_label = tk.Label(
+            main_frame,
+            text="◆ CRITICAL HITS (avg yield)",
+            fg=CYAN,
+            bg=BG_PANEL,
+            font=("Consolas", 9, "bold")
+        )
+        crit_label.grid(row=crit_section_row, column=0, columnspan=4, sticky="w", pady=(15, 5))
+
+        active_crit = tracker.get_active_crit()
+
+        # Crit chance
+        crit_row1 = crit_section_row + 1
+        tk.Label(main_frame, text="Crit Chance:", fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).grid(row=crit_row1, column=0, columnspan=2, sticky="e", padx=(0, 5), pady=3)
+
+        crit_chance_var = tk.StringVar(value=str(active_crit["chance"]) if active_crit["chance"] > 0 else "")
+        crit_chance_entry = tk.Entry(
+            main_frame,
+            textvariable=crit_chance_var,
+            width=8,
+            font=("Consolas", 9),
+            bg=BG,
+            fg=WHITE,
+            insertbackground=CYAN
+        )
+        crit_chance_entry.grid(row=crit_row1, column=2, sticky="w", padx=5, pady=3)
+
+        tk.Label(main_frame, text="% (e.g. 1.50)", fg=GOLD, bg=BG_PANEL, font=("Consolas", 8)).grid(row=crit_row1, column=3, sticky="w", padx=5, pady=3)
+
+        # Crit bonus yield
+        crit_row2 = crit_section_row + 2
+        tk.Label(main_frame, text="Crit Bonus:", fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).grid(row=crit_row2, column=0, columnspan=2, sticky="e", padx=(0, 5), pady=3)
+
+        crit_bonus_var = tk.StringVar(value=str(active_crit["bonus"]) if active_crit["bonus"] > 0 else "")
+        crit_bonus_entry = tk.Entry(
+            main_frame,
+            textvariable=crit_bonus_var,
+            width=8,
+            font=("Consolas", 9),
+            bg=BG,
+            fg=WHITE,
+            insertbackground=CYAN
+        )
+        crit_bonus_entry.grid(row=crit_row2, column=2, sticky="w", padx=5, pady=3)
+
+        tk.Label(main_frame, text="% (e.g. 250)", fg=GOLD, bg=BG_PANEL, font=("Consolas", 8)).grid(row=crit_row2, column=3, sticky="w", padx=5, pady=3)
+
+        crit_vars = {
+            'chance': crit_chance_var,
+            'bonus': crit_bonus_var
+        }
+
+        preview_row = crit_row2 + 1
 
         # Theoretical preview
         preview_frame = tk.Frame(main_frame, bg=BG, padx=10, pady=8)
@@ -2539,7 +2714,7 @@ class MiningDashboard:
         preview_label.pack()
 
         def update_preview(*args):
-            total_m3_per_sec = 0.0
+            module_m3_per_sec = 0.0
             active_count = 0
             for mv in module_vars:
                 if mv['enabled'].get():
@@ -2547,12 +2722,30 @@ class MiningDashboard:
                         y = float(mv['yield'].get()) if mv['yield'].get() else 0.0
                         c = float(mv['cycle'].get()) if mv['cycle'].get() else 0.0
                         if y > 0 and c > 0:
-                            total_m3_per_sec += y / c
+                            module_m3_per_sec += y / c
                             active_count += 1
                     except ValueError:
                         pass
 
-            # Add drone contribution
+            # Apply Highwall MX-1005 implant bonus (+5%) to modules only
+            has_implant = implant_var.get()
+            if has_implant and module_m3_per_sec > 0:
+                module_m3_per_sec *= 1.05
+
+            # Apply critical hit average yield to modules only
+            has_crit = False
+            try:
+                cc = float(crit_vars['chance'].get()) if crit_vars['chance'].get() else 0.0
+                cb = float(crit_vars['bonus'].get()) if crit_vars['bonus'].get() else 0.0
+                if cc > 0 and cb > 0 and module_m3_per_sec > 0:
+                    module_m3_per_sec *= (1 + (cc / 100.0) * (cb / 100.0))
+                    has_crit = True
+            except ValueError:
+                pass
+
+            total_m3_per_sec = module_m3_per_sec
+
+            # Add drone contribution (not affected by implant)
             drone_count = 0
             try:
                 dc = int(drone_vars['count'].get()) if drone_vars['count'].get() else 0
@@ -2571,6 +2764,8 @@ class MiningDashboard:
                     parts.append(f"{active_count} mod{'s' if active_count > 1 else ''}")
                 if drone_count > 0:
                     parts.append(f"{drone_count} drone{'s' if drone_count > 1 else ''}")
+                if has_implant:
+                    parts.append("HW")
                 detail = " + ".join(parts)
                 preview_label.config(
                     text=f"◈ Theoretical: {total_m3_per_sec:.2f} m3/s ({total_m3_per_sec * 3600:,.0f} m3/hr) [{detail}]"
@@ -2586,6 +2781,11 @@ class MiningDashboard:
         drone_vars['count'].trace_add('write', update_preview)
         drone_vars['yield'].trace_add('write', update_preview)
         drone_vars['cycle'].trace_add('write', update_preview)
+
+        implant_var.trace_add('write', update_preview)
+
+        crit_vars['chance'].trace_add('write', update_preview)
+        crit_vars['bonus'].trace_add('write', update_preview)
 
         # Profile change handler
         def on_profile_change(*args):
@@ -2622,6 +2822,17 @@ class MiningDashboard:
             except ValueError:
                 dc, dy, dcy = 0, 0.0, 0.0
             tracker.drone_profiles[tracker.active_profile] = MiningDrone(dc, dy, dcy)
+            
+            # Save implant state
+            tracker.implant_profiles[tracker.active_profile] = implant_var.get()
+            
+            # Save crit config
+            try:
+                cc = float(crit_vars['chance'].get()) if crit_vars['chance'].get() else 0.0
+                cb = float(crit_vars['bonus'].get()) if crit_vars['bonus'].get() else 0.0
+            except ValueError:
+                cc, cb = 0.0, 0.0
+            tracker.crit_profiles[tracker.active_profile] = {"chance": cc, "bonus": cb}
 
         update_preview()
 
@@ -2759,7 +2970,7 @@ class MiningDashboard:
         return result[0] if result[0] else None
 
     def create_new_profile(self, tracker: CharacterTracker, current_profile_var: tk.StringVar, 
-                          profile_menu: tk.OptionMenu, module_vars: List, update_preview_fn, parent_dialog=None, drone_vars=None):
+                          profile_menu: tk.OptionMenu, module_vars: List, update_preview_fn, parent_dialog=None, drone_vars=None, implant_var=None, crit_vars=None):
         # Create a new ship profile
         parent = parent_dialog or self.root
         new_name = self._ask_string_centered(
@@ -2796,6 +3007,15 @@ class MiningDashboard:
                     drone_vars['count'].set("")
                     drone_vars['yield'].set("")
                     drone_vars['cycle'].set("")
+                
+                # Clear implant checkbox
+                if implant_var:
+                    implant_var.set(False)
+                
+                # Clear crit vars
+                if crit_vars:
+                    crit_vars['chance'].set("")
+                    crit_vars['bonus'].set("")
                 
                 update_preview_fn()
             else:
@@ -2836,7 +3056,7 @@ class MiningDashboard:
                                     parent=parent)
 
     def delete_current_profile(self, tracker: CharacterTracker, current_profile_var: tk.StringVar, 
-                               profile_menu: tk.OptionMenu, module_vars: List, update_preview_fn, parent_dialog=None, drone_vars=None):
+                               profile_menu: tk.OptionMenu, module_vars: List, update_preview_fn, parent_dialog=None, drone_vars=None, implant_var=None, crit_vars=None):
         # Delete the current profile
         profile_to_delete = tracker.active_profile
         parent = parent_dialog or self.root
@@ -2889,6 +3109,16 @@ class MiningDashboard:
                     drone_vars['yield'].set(str(drone.yield_per_cycle) if drone.yield_per_cycle > 0 else "")
                     drone_vars['cycle'].set(str(drone.cycle_time) if drone.cycle_time > 0 else "")
                 
+                # Load implant state for new active profile
+                if implant_var:
+                    implant_var.set(tracker.get_active_implant())
+                
+                # Load crit config for new active profile
+                if crit_vars:
+                    crit = tracker.get_active_crit()
+                    crit_vars['chance'].set(str(crit["chance"]) if crit["chance"] > 0 else "")
+                    crit_vars['bonus'].set(str(crit["bonus"]) if crit["bonus"] > 0 else "")
+                
                 update_preview_fn()
 
     def update_ship_indicator(self, char_id: str):
@@ -2917,18 +3147,8 @@ class MiningDashboard:
         theoretical_m3_per_sec = tracker.get_total_theoretical_m3_per_sec()
 
         if theoretical_m3_per_sec > 0:
-            # Build detail showing modules + drones
-            parts = []
-            mod_count = tracker.get_active_module_count()
-            if mod_count > 0:
-                parts.append(f"{mod_count}M")
-            drone = tracker.get_active_drones()
-            if drone.is_configured():
-                parts.append(f"{drone.count}D")
-            detail = "+".join(parts) if parts else ""
-            detail_str = f" [{detail}]" if detail else ""
             widgets['theoretical'].config(
-                text=f"◈ Theoretical: {theoretical_m3_per_sec:.2f} m3/s ({theoretical_m3_per_sec * 3600:,.0f} m3/hr){detail_str}"
+                text=f"◈ Theoretical: {theoretical_m3_per_sec:.2f} m3/s ({theoretical_m3_per_sec * 3600:,.0f} m3/hr)"
             )
         else:
             widgets['theoretical'].config(text="◈ Theoretical: -- m3/s (configure ship)")
