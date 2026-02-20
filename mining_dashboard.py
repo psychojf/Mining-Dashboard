@@ -2,7 +2,9 @@ import os
 import re
 import glob
 import json
-from datetime import datetime, timedelta
+import urllib.request
+import urllib.error
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from functools import lru_cache
 import tkinter as tk
@@ -441,6 +443,11 @@ class MiningDashboard:
         self.app_config = self.load_config()
         self._apply_saved_app_settings()
 
+        # Fleet mode settings
+        fleet_cfg = self.app_config.get("fleet", {})
+        self.fleet_mode = fleet_cfg.get("enabled", False)
+        self.fleet_webhook_url = fleet_cfg.get("webhook_url", "")
+
         # Set position from saved geometry
         saved_geom = self.app_config.get("win_geom", "+100+100")
         try:
@@ -563,6 +570,10 @@ class MiningDashboard:
                 col_frame.pack(side="left", fill="both", expand=True, padx=3)
                 self.char_widgets[char_id] = widgets
                 self.update_ship_indicator(char_id)
+                
+                # Restore session button state after rebuild
+                if tracker.session_active:
+                    widgets['start_stop_btn'].config(text="■ STOP", fg=RED)
 
         self.root.update_idletasks()
         self.root.geometry("")
@@ -838,6 +849,83 @@ class MiningDashboard:
         )
         reset_btn.pack(side="left")
 
+        # Fleet report frame (always visible)
+        fleet_outer = tk.Frame(col_inner, bg=BORDER, padx=1, pady=1)
+        fleet_outer.pack(fill="x", pady=(6, 0))
+
+        fleet_frame = tk.Frame(fleet_outer, bg=BG_PANEL, padx=6, pady=4)
+        fleet_frame.pack(fill="x")
+
+        fleet_var = tk.BooleanVar(value=self.fleet_mode)
+
+        def on_fleet_toggle(*args):
+            enabled = fleet_var.get()
+            self.fleet_mode = enabled
+            # Update config
+            fleet_cfg = self.app_config.get("fleet", {})
+            fleet_cfg["enabled"] = enabled
+            self.app_config["fleet"] = fleet_cfg
+            self.save_config()
+            # Sync all character columns
+            for cid, w in self.char_widgets.items():
+                w['fleet_var'].set(enabled)
+            self._update_send_button_states()
+
+        fleet_cb = tk.Checkbutton(
+            fleet_frame,
+            variable=fleet_var,
+            command=lambda: on_fleet_toggle(),
+            bg=BG_PANEL,
+            activebackground=BG_PANEL,
+            selectcolor=WHITE,
+            highlightthickness=0
+        )
+        fleet_cb.pack(side="left", padx=(0, 2))
+
+        tk.Label(
+            fleet_frame,
+            text="⚓ Fleet",
+            fg=DIM,
+            bg=BG_PANEL,
+            font=("Consolas", 8, "bold")
+        ).pack(side="left", padx=(0, 6))
+
+        btn_state = "normal" if self.fleet_mode else "disabled"
+        has_webhook = self._is_valid_webhook_url()
+        send_state = "normal" if (self.fleet_mode and has_webhook) else "disabled"
+        fg_copy_init = GOLD if self.fleet_mode else DIM
+        fg_send_init = CYAN if (self.fleet_mode and has_webhook) else DIM
+
+        copy_btn = tk.Button(
+            fleet_frame,
+            text="⎘ COPY",
+            command=lambda: self.copy_session_report(char_id),
+            bg=BG,
+            fg=fg_copy_init,
+            font=("Consolas", 8, "bold"),
+            relief="flat",
+            cursor="hand2",
+            width=8,
+            state=btn_state,
+            disabledforeground=DIM
+        )
+        copy_btn.pack(side="left", padx=(0, 4))
+
+        send_btn = tk.Button(
+            fleet_frame,
+            text="▲ SEND",
+            command=lambda: self.show_send_report_dialog(char_id),
+            bg=BG,
+            fg=fg_send_init,
+            font=("Consolas", 8, "bold"),
+            relief="flat",
+            cursor="hand2",
+            width=8,
+            state=send_state,
+            disabledforeground=DIM
+        )
+        send_btn.pack(side="left")
+
         # Mining rate stats
         rate_frame = tk.Frame(col_inner, bg=BG_PANEL)
         rate_frame.pack(fill="x", pady=(5, 0))
@@ -900,7 +988,11 @@ class MiningDashboard:
             'actual': actual_label,
             'start_stop_btn': start_stop_btn,
             'ship_indicator': ship_indicator,
-            'profile_label': profile_label
+            'profile_label': profile_label,
+            'fleet_frame': fleet_frame,
+            'fleet_var': fleet_var,
+            'copy_btn': copy_btn,
+            'send_btn': send_btn
         }
 
         return col_outer, widgets
@@ -3400,6 +3492,30 @@ class MiningDashboard:
                                  app_settings.get("history_days", HISTORY_DAYS),
                                  width=10)
 
+        # Separator
+        tk.Label(
+            fields_frame,
+            text="-" * 55,
+            fg=BORDER,
+            bg=BG_PANEL,
+            font=("Consolas", 8)
+        ).grid(row=6, column=0, columnspan=3, pady=8)
+
+        # FLEET SETTINGS
+        tk.Label(
+            fields_frame,
+            text="◆ FLEET",
+            fg=CYAN,
+            bg=BG_PANEL,
+            font=("Consolas", 9, "bold")
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(0, 8))
+
+        fleet_cfg = self.app_config.get("fleet", {})
+
+        webhook_var = make_field(fields_frame, 8, "Webhook URL:",
+                                  fleet_cfg.get("webhook_url", ""),
+                                  width=40)
+
         # Buttons
         btn_frame = tk.Frame(main_frame, bg=BG_PANEL)
         btn_frame.pack(pady=(15, 0))
@@ -3434,6 +3550,14 @@ class MiningDashboard:
                 "history_days": HISTORY_DAYS,
                 "max_modules": MAX_MODULES
             }
+
+            # Save fleet settings (webhook URL only, fleet mode is toggled per-character)
+            self.fleet_webhook_url = webhook_var.get().strip()
+            fleet_cfg = self.app_config.get("fleet", {})
+            fleet_cfg["webhook_url"] = self.fleet_webhook_url
+            self.app_config["fleet"] = fleet_cfg
+            self.save_config()
+            self._update_send_button_states()
 
             try:
                 x = dialog.winfo_x()
@@ -3492,6 +3616,307 @@ class MiningDashboard:
                 dialog.focus_force()
 
         dialog.after(150, initial_focus)
+
+    # ========================= #
+    #      FLEET REPORTING     #
+    # ========================= #
+
+    def _is_valid_webhook_url(self) -> bool:
+        # Check if webhook URL looks like a valid Discord webhook
+        url = self.fleet_webhook_url.strip()
+        if not url:
+            return False
+        return url.startswith("https://discord.com/api/webhooks/") or url.startswith("https://discordapp.com/api/webhooks/")
+
+    def _update_send_button_states(self):
+        # Enable/disable SEND buttons based on fleet mode + valid webhook
+        has_webhook = self._is_valid_webhook_url()
+        for cid, w in self.char_widgets.items():
+            if self.fleet_mode:
+                w['copy_btn'].config(state="normal", fg=GOLD)
+                if has_webhook:
+                    w['send_btn'].config(state="normal", fg=CYAN)
+                else:
+                    w['send_btn'].config(state="disabled", fg=DIM)
+            else:
+                w['copy_btn'].config(state="disabled", fg=DIM)
+                w['send_btn'].config(state="disabled", fg=DIM)
+
+    def _build_session_report_text(self, tracker: CharacterTracker) -> str:
+        # Build a plain text mining report for clipboard
+        session_duration = time.time() - tracker.session_start_time
+        hours = int(session_duration // 3600)
+        minutes = int((session_duration % 3600) // 60)
+        duration_str = f"{hours}h {minutes:02d}m" if hours > 0 else f"{minutes}m"
+
+        lines = []
+        lines.append(f"Mining Report — {tracker.char_name}")
+        lines.append(f"Session: {duration_str} | Crits: {tracker.crit_count}")
+        lines.append("")
+
+        # Ore breakdown with units
+        total_m3 = 0.0
+        if tracker.ore_summary:
+            for ore_name, volume in sorted(tracker.ore_summary.items(), key=lambda x: x[1], reverse=True):
+                vol_per_unit, _ = self.get_ore_volume(ore_name)
+                units = int(volume / vol_per_unit) if vol_per_unit > 0 else 0
+                lines.append(f"  {ore_name}: {volume:,.1f} m³ ({units:,} units)")
+                total_m3 += volume
+        else:
+            lines.append("  No ores mined yet.")
+
+        lines.append("")
+        lines.append(f"Total: {total_m3:,.1f} m³")
+
+        return "\n".join(lines)
+
+    def _build_discord_payload(self, tracker: CharacterTracker) -> Dict:
+        # Build a Discord webhook payload with embed
+        session_m3 = tracker.total_m3 - tracker.session_start_m3
+        session_duration = time.time() - tracker.session_start_time
+        hours = int(session_duration // 3600)
+        minutes = int((session_duration % 3600) // 60)
+        duration_str = f"{hours}h {minutes:02d}m" if hours > 0 else f"{minutes}m"
+
+        # Build ore breakdown text with units
+        ore_lines = []
+        total_m3 = 0.0
+        if tracker.ore_summary:
+            for ore_name, volume in sorted(tracker.ore_summary.items(), key=lambda x: x[1], reverse=True):
+                vol_per_unit, _ = self.get_ore_volume(ore_name)
+                units = int(volume / vol_per_unit) if vol_per_unit > 0 else 0
+                ore_lines.append(f"{ore_name}: {volume:,.1f} m³ ({units:,} units)")
+                total_m3 += volume
+        ore_text = "\n".join(ore_lines) if ore_lines else "No ores mined."
+
+        embed = {
+            "title": f"⛏️ Mining Report — {tracker.char_name}",
+            "color": 0x3dd8e0,
+            "fields": [
+                {"name": "⏱️ Session", "value": duration_str, "inline": True},
+                {"name": "🎯 Crits", "value": str(tracker.crit_count), "inline": True},
+                {"name": "📦 Total", "value": f"{total_m3:,.1f} m³", "inline": True},
+                {"name": "💎 Ore Breakdown", "value": f"```\n{ore_text}\n```", "inline": False},
+            ],
+            "footer": {"text": "EVE Mining Dashboard"},
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+        return {"embeds": [embed]}
+
+    def copy_session_report(self, char_id: str):
+        # Copy session report to clipboard
+        tracker = self.all_characters.get(char_id)
+        if not tracker:
+            return
+
+        session_m3 = tracker.total_m3 - tracker.session_start_m3
+        if session_m3 <= 0 and not tracker.ore_summary:
+            messagebox.showinfo("No Data", "No mining data in current session.",
+                                parent=self.root)
+            return
+
+        report_text = self._build_session_report_text(tracker)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(report_text)
+
+        # Brief visual feedback on the copy button
+        if char_id in self.char_widgets:
+            btn = self.char_widgets[char_id].get('copy_btn')
+            if btn:
+                original_text = btn.cget('text')
+                original_fg = btn.cget('fg')
+                btn.config(text="✓ COPIED", fg=GREEN)
+                btn.after(2000, lambda: btn.config(text=original_text, fg=original_fg))
+
+    def show_send_report_dialog(self, char_id: str):
+        # Show confirmation dialog before sending to Discord
+        tracker = self.all_characters.get(char_id)
+        if not tracker:
+            return
+
+        session_m3 = tracker.total_m3 - tracker.session_start_m3
+        if session_m3 <= 0 and not tracker.ore_summary:
+            messagebox.showinfo("No Data", "No mining data in current session.",
+                                parent=self.root)
+            return
+
+        if not self.fleet_webhook_url:
+            messagebox.showwarning("No Webhook",
+                "Webhook URL not configured.\nSet it in ⚙ Config → Fleet Mode.",
+                parent=self.root)
+            return
+
+        # Build preview text
+        report_text = self._build_session_report_text(tracker)
+
+        # Create confirmation dialog
+        dlg = tk.Toplevel(self.root)
+        dlg.configure(bg=BORDER)
+        dlg.overrideredirect(True)
+        dlg.wm_attributes("-topmost", 1)
+        dlg.attributes("-alpha", 0.90)
+        dlg.resizable(False, False)
+
+        _drag_x = [0]
+        _drag_y = [0]
+
+        def start_drag(event):
+            _drag_x[0] = event.x
+            _drag_y[0] = event.y
+
+        def do_drag(event):
+            x = dlg.winfo_x() + event.x - _drag_x[0]
+            y = dlg.winfo_y() + event.y - _drag_y[0]
+            dlg.geometry(f"+{x}+{y}")
+
+        dlg.bind("<Button-1>", start_drag)
+        dlg.bind("<B1-Motion>", do_drag)
+
+        border_frame = tk.Frame(dlg, bg=BORDER, padx=1, pady=1)
+        border_frame.pack(fill="both", expand=True)
+
+        main_frame = tk.Frame(border_frame, bg=BG_PANEL, padx=15, pady=15)
+        main_frame.pack(fill="both", expand=True)
+
+        # Title
+        tk.Label(
+            main_frame,
+            text="▲ Send Mining Report to Discord?",
+            fg=CYAN,
+            bg=BG_PANEL,
+            font=("Consolas", 10, "bold")
+        ).pack(anchor="w", pady=(0, 10))
+
+        # Preview box
+        preview_outer = tk.Frame(main_frame, bg=BORDER, padx=1, pady=1)
+        preview_outer.pack(fill="both", pady=(0, 10))
+
+        preview_text = tk.Text(
+            preview_outer,
+            bg=BG,
+            fg=WHITE,
+            font=("Consolas", 9),
+            relief="flat",
+            padx=10,
+            pady=10,
+            wrap="word",
+            width=42,
+            height=12
+        )
+        preview_text.pack(fill="both")
+        preview_text.insert("1.0", report_text)
+        preview_text.config(state="disabled")
+
+        # Webhook URL preview (truncated)
+        url_display = self.fleet_webhook_url
+        if len(url_display) > 50:
+            url_display = url_display[:25] + "..." + url_display[-22:]
+        tk.Label(
+            main_frame,
+            text=f"To: {url_display}",
+            fg=DIM,
+            bg=BG_PANEL,
+            font=("Consolas", 8)
+        ).pack(anchor="w", pady=(0, 8))
+
+        # Buttons
+        btn_frame = tk.Frame(main_frame, bg=BG_PANEL)
+        btn_frame.pack()
+
+        def do_send():
+            dlg.destroy()
+            self._send_to_webhook(char_id)
+
+        tk.Button(
+            btn_frame,
+            text="✖ Cancel",
+            command=dlg.destroy,
+            bg=BG,
+            fg=RED,
+            font=("Consolas", 9, "bold"),
+            relief="flat",
+            cursor="hand2",
+            width=10
+        ).pack(side="left", padx=5)
+
+        tk.Button(
+            btn_frame,
+            text="✔ Send",
+            command=do_send,
+            bg=BG,
+            fg=GREEN,
+            font=("Consolas", 9, "bold"),
+            relief="flat",
+            cursor="hand2",
+            width=10
+        ).pack(side="left", padx=5)
+
+        # Center on main window
+        dlg.update_idletasks()
+        pw = self.root.winfo_width()
+        ph = self.root.winfo_height()
+        px = self.root.winfo_x()
+        py = self.root.winfo_y()
+        dw = dlg.winfo_reqwidth()
+        dh = dlg.winfo_reqheight()
+        x = px + (pw - dw) // 2
+        y = py + (ph - dh) // 2
+        dlg.geometry(f"+{x}+{y}")
+
+    def _send_to_webhook(self, char_id: str):
+        # Send mining report to Discord webhook
+        tracker = self.all_characters.get(char_id)
+        if not tracker or not self.fleet_webhook_url:
+            return
+
+        payload = self._build_discord_payload(tracker)
+
+        try:
+            data = json.dumps(payload).encode('utf-8')
+            req = urllib.request.Request(
+                self.fleet_webhook_url,
+                data=data,
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "EVE-Mining-Dashboard/1.0"
+                },
+                method="POST"
+            )
+            response = urllib.request.urlopen(req, timeout=10)
+            status = response.getcode()
+
+            if status in (200, 204):
+                # Success feedback on send button
+                if char_id in self.char_widgets:
+                    btn = self.char_widgets[char_id].get('send_btn')
+                    if btn:
+                        original_text = btn.cget('text')
+                        original_fg = btn.cget('fg')
+                        btn.config(text="✓ SENT", fg=GREEN)
+                        btn.after(3000, lambda: btn.config(text=original_text, fg=original_fg))
+            else:
+                messagebox.showerror("Send Failed",
+                    f"Discord returned status {status}",
+                    parent=self.root)
+
+        except urllib.error.HTTPError as e:
+            error_body = ""
+            try:
+                error_body = e.read().decode('utf-8', errors='ignore')[:200]
+            except Exception:
+                pass
+            messagebox.showerror("Send Failed",
+                f"HTTP {e.code}: {e.reason}\n{error_body}",
+                parent=self.root)
+        except urllib.error.URLError as e:
+            messagebox.showerror("Send Failed",
+                f"Connection error:\n{str(e.reason)}",
+                parent=self.root)
+        except Exception as e:
+            messagebox.showerror("Send Failed",
+                f"Error: {str(e)}",
+                parent=self.root)
 
     def _enable_config_icon(self):
         self.config_icon.config(fg=DIM)

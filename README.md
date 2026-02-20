@@ -19,3 +19,4 @@ A real-time mining activity tracker for EVE Online. Monitors your game logs to d
 | **Critical Hit Alerts** | Desktop notification + optional sound alert on critical mining successes |
 | **Compression Tracking** | Logs in-space compression events from your game logs |
 | **Always-On-Top Overlay** | Semi-transparent, borderless window that stays above your game |
+| **Fleet Mode** | Share session reports with your fleet via Discord webhook or clipboard copy |

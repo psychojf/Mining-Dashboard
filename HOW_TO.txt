@@ -30,6 +30,39 @@ from the MAIN ui, right-click on a character's column and select **Ship Config**
 - Click **SAVE** to apply. The dashboard will now show theoretical m3/s and compare it to your actual mining rate during active sessions.
 
 
+## Fleet Mode
+
+Fleet Mode lets you report mining session statistics directly to a Discord channel via webhook, making it easy to coordinate and share results during fleet mining operations.
+
+### Setup
+
+1. Open **Settings** and paste your Discord webhook URL into the **Webhook URL** field.
+2. Enable the **⚓ Fleet** toggle on any character column to activate fleet reporting for that session.
+
+### Sending Reports
+
+Once Fleet Mode is enabled, two buttons appear per character:
+
+| Button | Action |
+|---|---|
+| **⎘ COPY** | Copies a plain-text session report to your clipboard |
+| **▲ SEND** | Opens a confirmation dialog and posts a rich embed directly to Discord |
+
+The **SEND** button is only active when a valid Discord webhook URL is configured.
+
+### Report Contents
+
+Each report includes:
+
+- Character name
+- Session duration
+- Critical hit count
+- Per-ore-type volume breakdown (m³ and unit count)
+- Total volume mined
+
+Discord reports are sent as formatted embeds with a timestamp.
+
+
 ### Start monitoring
 
 
@@ -37,18 +70,6 @@ from the MAIN ui, right-click on a character's column and select **Ship Config**
 2. Click **START** under a character's column to begin tracking that session.
 3. Mine as usual in EVE -- stats update in real time.
 4. Click **STOP** to pause tracking, or **RESET** to clear all stats for that character.
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 ### Viewing Mining History
@@ -75,37 +96,3 @@ Settings are saved automatically to `mining_config.json` in the same folder as t
 
 
 Delete this file to reset everything to defaults.
-
-
-## Supported Ore Types
-
-
-The dashboard recognizes all major EVE ore categories including their grade variants (II-Grade, III-Grade, IV-Grade):
-
-
-- **Standard ores**: Veldspar, Scordite, Pyroxeres, Plagioclase, Omber, Kernite
-- **Low-sec ores**: Jaspet, Hemorphite, Hedbergite
-- **Null-sec ores**: Gneiss, Dark Ochre, Spodumain, Crokite, Bistot, Arkonor, Mercoxit
-- **Moon ores**: R4 through R64 (Zeolites, Cobaltite, Otavite, Carnotite, Xenotime, etc.)
-- **Ice**: Blue Ice, Clear Icicle, Glacial Mass, White Glaze, and others
-- **Pochven ores**: Bezdnacine, Rakovene, Talassonite
-- **Gas clouds**: All Cytoserocin, Mykoserocin, and Fullerite variants
-- **Special ores**: Ueganite, Prismaticite, Ducinium
-
-
-## Tips
-
-
-- The dashboard window is **draggable** -- click and drag anywhere on the background.
-- The overlay is semi-transparent (85% opacity) by default.
-- If a character's ship indicator diamond is **green**, at least one module is configured. **Red** means no modules are set up yet.
-- The active profile name is shown in angle brackets next to each character's name.
-- All window positions are saved between sessions.
-
-
-## Troubleshooting
-
-
-- **No characters detected**: Make sure EVE has been launched at least once and game logs exist in the Gamelogs folder. Check the path in Config if using a custom location.
-- **Stats not updating**: Ensure the session is started (button should say "STOP"). The dashboard only tracks mining events while a session is active.
-- **No sound on critical hits**: Be sure `alert_crit.wav` file in the same folder as the script. if not you can basicly put any wav file there as long as the name stil is "alert_crit.wav"
