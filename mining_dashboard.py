@@ -260,6 +260,37 @@ class MiningModule:
             enabled=data.get("enabled", True)
         )
 
+class MiningDrone:
+    MAX_DRONES = 5
+
+    def __init__(self, count: int = 0, yield_per_cycle: float = 0.0, cycle_time: float = 0.0):
+        self.count = max(0, min(count, self.MAX_DRONES))
+        self.yield_per_cycle = yield_per_cycle
+        self.cycle_time = cycle_time
+
+    def get_total_m3_per_sec(self) -> float:
+        if self.count > 0 and self.yield_per_cycle > 0 and self.cycle_time > 0:
+            return (self.yield_per_cycle / self.cycle_time) * self.count
+        return 0.0
+
+    def is_configured(self) -> bool:
+        return self.count > 0 and self.yield_per_cycle > 0 and self.cycle_time > 0
+
+    def to_dict(self) -> Dict:
+        return {
+            "count": self.count,
+            "yield_per_cycle": self.yield_per_cycle,
+            "cycle_time": self.cycle_time
+        }
+
+    @staticmethod
+    def from_dict(data: Dict) -> 'MiningDrone':
+        return MiningDrone(
+            count=data.get("count", 0),
+            yield_per_cycle=data.get("yield_per_cycle", 0.0),
+            cycle_time=data.get("cycle_time", 0.0)
+        )
+
 class CharacterTracker:
     def __init__(self, char_id: str, char_name: str):
         self.char_id = char_id
@@ -271,8 +302,10 @@ class CharacterTracker:
         self.ore_summary: Dict[str, float] = {}
         self.compression_log: Dict[str, float] = {}
         
-        # NEW: Multiple ship profiles support
+        # Multiple ship profiles support
         self.ship_profiles: Dict[str, List[MiningModule]] = {"Default": []}
+        # Drone config per profile
+        self.drone_profiles: Dict[str, MiningDrone] = {"Default": MiningDrone()}
         self.active_profile: str = "Default"
         
         self.session_start_time: float = time.time()
@@ -287,18 +320,32 @@ class CharacterTracker:
         # Set modules for the currently active profile
         self.ship_profiles[self.active_profile] = modules
 
+    def get_active_drones(self) -> MiningDrone:
+        # Get the drone config for the currently active profile
+        return self.drone_profiles.get(self.active_profile, MiningDrone())
+
+    def set_active_drones(self, drone: MiningDrone):
+        # Set drone config for the currently active profile
+        self.drone_profiles[self.active_profile] = drone
+
     def get_total_theoretical_m3_per_sec(self) -> float:
         total = 0.0
         for module in self.get_active_modules():
             if module.enabled and module.is_configured():
                 total += module.get_m3_per_sec()
+        # Add drone contribution
+        drone = self.get_active_drones()
+        if drone.is_configured():
+            total += drone.get_total_m3_per_sec()
         return total
 
     def get_active_module_count(self) -> int:
         return sum(1 for m in self.get_active_modules() if m.enabled and m.is_configured())
 
     def has_any_configured_module(self) -> bool:
-        return any(m.is_configured() for m in self.get_active_modules())
+        has_module = any(m.is_configured() for m in self.get_active_modules())
+        has_drone = self.get_active_drones().is_configured()
+        return has_module or has_drone
 
     def get_profile_names(self) -> List[str]:
         # Get list of all profile names
@@ -308,6 +355,7 @@ class CharacterTracker:
         # Create a new empty profile
         if name and name not in self.ship_profiles:
             self.ship_profiles[name] = []
+            self.drone_profiles[name] = MiningDrone()
             return True
         return False
 
@@ -321,6 +369,8 @@ class CharacterTracker:
                         self.active_profile = profile_name
                         break
             del self.ship_profiles[name]
+            if name in self.drone_profiles:
+                del self.drone_profiles[name]
             return True
         return False
 
@@ -328,6 +378,8 @@ class CharacterTracker:
         # Rename a profile
         if old_name in self.ship_profiles and new_name and new_name not in self.ship_profiles:
             self.ship_profiles[new_name] = self.ship_profiles.pop(old_name)
+            if old_name in self.drone_profiles:
+                self.drone_profiles[new_name] = self.drone_profiles.pop(old_name)
             if self.active_profile == old_name:
                 self.active_profile = new_name
             return True
@@ -2039,11 +2091,19 @@ class MiningDashboard:
                 
                 if "profiles" in cfg:
                     tracker.ship_profiles = {}
+                    tracker.drone_profiles = {}
                     for profile_name, profile_data in cfg["profiles"].items():
                         modules = []
                         for mod_data in profile_data.get("modules", []):
                             modules.append(MiningModule.from_dict(mod_data))
                         tracker.ship_profiles[profile_name] = modules
+                        
+                        # Load drone config for this profile
+                        drone_data = profile_data.get("drones", {})
+                        if drone_data:
+                            tracker.drone_profiles[profile_name] = MiningDrone.from_dict(drone_data)
+                        else:
+                            tracker.drone_profiles[profile_name] = MiningDrone()
                     
                     tracker.active_profile = cfg.get("active_profile", "Default")
                     
@@ -2054,6 +2114,7 @@ class MiningDashboard:
                         else:
                             tracker.active_profile = "Default"
                             tracker.ship_profiles["Default"] = []
+                            tracker.drone_profiles["Default"] = MiningDrone()
                 
                 elif "modules" in cfg:
                     modules_data = cfg.get("modules", [])
@@ -2061,6 +2122,7 @@ class MiningDashboard:
                     for mod_data in modules_data:
                         modules.append(MiningModule.from_dict(mod_data))
                     tracker.ship_profiles = {"Default": modules}
+                    tracker.drone_profiles = {"Default": MiningDrone()}
                     tracker.active_profile = "Default"
                 
                 # yield/cycle
@@ -2075,6 +2137,7 @@ class MiningDashboard:
                             enabled=True
                         )
                         tracker.ship_profiles = {"Default": [module]}
+                        tracker.drone_profiles = {"Default": MiningDrone()}
                         tracker.active_profile = "Default"
 
     def save_ship_configs(self):
@@ -2083,8 +2146,10 @@ class MiningDashboard:
         for char_id, tracker in self.all_characters.items():
             profiles_data = {}
             for profile_name, modules in tracker.ship_profiles.items():
+                drone = tracker.drone_profiles.get(profile_name, MiningDrone())
                 profiles_data[profile_name] = {
-                    "modules": [m.to_dict() for m in modules]
+                    "modules": [m.to_dict() for m in modules],
+                    "drones": drone.to_dict()
                 }
             
             ship_configs[char_id] = {
@@ -2224,7 +2289,7 @@ class MiningDashboard:
         btn_new = tk.Button(
             profile_frame,
             text="+ NEW",
-            command=lambda: self.create_new_profile(tracker, current_profile, profile_menu, module_vars, update_preview, dialog),
+            command=lambda: self.create_new_profile(tracker, current_profile, profile_menu, module_vars, update_preview, dialog, drone_vars),
             bg=BG,
             fg=GREEN,
             font=("Consolas", 8, "bold"),
@@ -2250,7 +2315,7 @@ class MiningDashboard:
         btn_delete = tk.Button(
             profile_frame,
             text="✕ DELETE",
-            command=lambda: self.delete_current_profile(tracker, current_profile, profile_menu, module_vars, update_preview, dialog),
+            command=lambda: self.delete_current_profile(tracker, current_profile, profile_menu, module_vars, update_preview, dialog, drone_vars),
             bg=BG,
             fg=RED,
             font=("Consolas", 8, "bold"),
@@ -2296,6 +2361,12 @@ class MiningDashboard:
                     mv['name_entry'].config(state="disabled")
                 else:
                     mv['name_entry'].config(state="normal")
+            
+            # Load drone config
+            drone = tracker.drone_profiles.get(profile_name, MiningDrone())
+            drone_vars['count'].set(str(drone.count) if drone.count > 0 else "")
+            drone_vars['yield'].set(str(drone.yield_per_cycle) if drone.yield_per_cycle > 0 else "")
+            drone_vars['cycle'].set(str(drone.cycle_time) if drone.cycle_time > 0 else "")
             
             update_preview()
 
@@ -2383,9 +2454,84 @@ class MiningDashboard:
 
         sep_row = 4 + MAX_MODULES
 
+        # ========================= #
+        #      MINING DRONES       #
+        # ========================= #
+
+        drones_label = tk.Label(
+            main_frame,
+            text="◆ MINING DRONES",
+            fg=CYAN,
+            bg=BG_PANEL,
+            font=("Consolas", 9, "bold")
+        )
+        drones_label.grid(row=sep_row, column=0, columnspan=4, sticky="w", pady=(15, 5))
+
+        drone_row = sep_row + 1
+
+        # Drone count
+        tk.Label(main_frame, text="Count:", fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).grid(row=drone_row, column=0, columnspan=2, sticky="e", padx=(0, 5), pady=3)
+
+        active_drone = tracker.get_active_drones()
+        drone_count_var = tk.StringVar(value=str(active_drone.count) if active_drone.count > 0 else "")
+        drone_count_entry = tk.Entry(
+            main_frame,
+            textvariable=drone_count_var,
+            width=6,
+            font=("Consolas", 9),
+            bg=BG,
+            fg=WHITE,
+            insertbackground=CYAN
+        )
+        drone_count_entry.grid(row=drone_row, column=2, sticky="w", padx=5, pady=3)
+
+        tk.Label(main_frame, text="(max 5)", fg=GOLD, bg=BG_PANEL, font=("Consolas", 8)).grid(row=drone_row, column=3, sticky="w", padx=5, pady=3)
+
+        # Drone yield per cycle
+        drone_row2 = drone_row + 1
+        tk.Label(main_frame, text="Yield (m3/cycle):", fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).grid(row=drone_row2, column=0, columnspan=2, sticky="e", padx=(0, 5), pady=3)
+
+        drone_yield_var = tk.StringVar(value=str(active_drone.yield_per_cycle) if active_drone.yield_per_cycle > 0 else "")
+        drone_yield_entry = tk.Entry(
+            main_frame,
+            textvariable=drone_yield_var,
+            width=12,
+            font=("Consolas", 9),
+            bg=BG,
+            fg=WHITE,
+            insertbackground=CYAN
+        )
+        drone_yield_entry.grid(row=drone_row2, column=2, sticky="w", padx=5, pady=3)
+
+        tk.Label(main_frame, text="per drone", fg=GOLD, bg=BG_PANEL, font=("Consolas", 8)).grid(row=drone_row2, column=3, sticky="w", padx=5, pady=3)
+
+        # Drone cycle time
+        drone_row3 = drone_row + 2
+        tk.Label(main_frame, text="Cycle Time (s):", fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).grid(row=drone_row3, column=0, columnspan=2, sticky="e", padx=(0, 5), pady=3)
+
+        drone_cycle_var = tk.StringVar(value=str(active_drone.cycle_time) if active_drone.cycle_time > 0 else "")
+        drone_cycle_entry = tk.Entry(
+            main_frame,
+            textvariable=drone_cycle_var,
+            width=12,
+            font=("Consolas", 9),
+            bg=BG,
+            fg=WHITE,
+            insertbackground=CYAN
+        )
+        drone_cycle_entry.grid(row=drone_row3, column=2, sticky="w", padx=5, pady=3)
+
+        drone_vars = {
+            'count': drone_count_var,
+            'yield': drone_yield_var,
+            'cycle': drone_cycle_var
+        }
+
+        preview_row = drone_row + 3
+
         # Theoretical preview
         preview_frame = tk.Frame(main_frame, bg=BG, padx=10, pady=8)
-        preview_frame.grid(row=sep_row, column=0, columnspan=4, sticky="ew", pady=(15, 10))
+        preview_frame.grid(row=preview_row, column=0, columnspan=4, sticky="ew", pady=(15, 10))
 
         preview_label = tk.Label(
             preview_frame,
@@ -2410,9 +2556,28 @@ class MiningDashboard:
                     except ValueError:
                         pass
 
+            # Add drone contribution
+            drone_count = 0
+            try:
+                dc = int(drone_vars['count'].get()) if drone_vars['count'].get() else 0
+                dy = float(drone_vars['yield'].get()) if drone_vars['yield'].get() else 0.0
+                dcy = float(drone_vars['cycle'].get()) if drone_vars['cycle'].get() else 0.0
+                if dc > 0 and dy > 0 and dcy > 0:
+                    dc = max(0, min(dc, MiningDrone.MAX_DRONES))
+                    total_m3_per_sec += (dy / dcy) * dc
+                    drone_count = dc
+            except ValueError:
+                pass
+
             if total_m3_per_sec > 0:
+                parts = []
+                if active_count > 0:
+                    parts.append(f"{active_count} mod{'s' if active_count > 1 else ''}")
+                if drone_count > 0:
+                    parts.append(f"{drone_count} drone{'s' if drone_count > 1 else ''}")
+                detail = " + ".join(parts)
                 preview_label.config(
-                    text=f"◈ Theoretical: {total_m3_per_sec:.2f} m3/s ({total_m3_per_sec * 3600:,.0f} m3/hr) [{active_count} module{'s' if active_count > 1 else ''}]"
+                    text=f"◈ Theoretical: {total_m3_per_sec:.2f} m3/s ({total_m3_per_sec * 3600:,.0f} m3/hr) [{detail}]"
                 )
             else:
                 preview_label.config(text="◈ Theoretical: -- m3/s (configure modules)")
@@ -2421,6 +2586,10 @@ class MiningDashboard:
             mv['enabled'].trace_add('write', update_preview)
             mv['yield'].trace_add('write', update_preview)
             mv['cycle'].trace_add('write', update_preview)
+
+        drone_vars['count'].trace_add('write', update_preview)
+        drone_vars['yield'].trace_add('write', update_preview)
+        drone_vars['cycle'].trace_add('write', update_preview)
 
         # Profile change handler
         def on_profile_change(*args):
@@ -2447,12 +2616,22 @@ class MiningDashboard:
                 )
                 modules.append(mod)
             tracker.ship_profiles[tracker.active_profile] = modules
+            
+            # Save drone config
+            try:
+                dc = int(drone_vars['count'].get()) if drone_vars['count'].get() else 0
+                dy = float(drone_vars['yield'].get()) if drone_vars['yield'].get() else 0.0
+                dcy = float(drone_vars['cycle'].get()) if drone_vars['cycle'].get() else 0.0
+                dc = max(0, min(dc, MiningDrone.MAX_DRONES))
+            except ValueError:
+                dc, dy, dcy = 0, 0.0, 0.0
+            tracker.drone_profiles[tracker.active_profile] = MiningDrone(dc, dy, dcy)
 
         update_preview()
 
         # Buttons
         btn_frame = tk.Frame(main_frame, bg=BG_PANEL)
-        btn_frame.grid(row=sep_row + 1, column=0, columnspan=4, pady=(10, 0))
+        btn_frame.grid(row=preview_row + 1, column=0, columnspan=4, pady=(10, 0))
 
         def save_and_close():
             try:
@@ -2584,7 +2763,7 @@ class MiningDashboard:
         return result[0] if result[0] else None
 
     def create_new_profile(self, tracker: CharacterTracker, current_profile_var: tk.StringVar, 
-                          profile_menu: tk.OptionMenu, module_vars: List, update_preview_fn, parent_dialog=None):
+                          profile_menu: tk.OptionMenu, module_vars: List, update_preview_fn, parent_dialog=None, drone_vars=None):
         # Create a new ship profile
         parent = parent_dialog or self.root
         new_name = self._ask_string_centered(
@@ -2615,6 +2794,12 @@ class MiningDashboard:
                     mv['yield'].set("")
                     mv['cycle'].set("")
                     mv['name_entry'].config(state="disabled")
+                
+                # Clear drone vars
+                if drone_vars:
+                    drone_vars['count'].set("")
+                    drone_vars['yield'].set("")
+                    drone_vars['cycle'].set("")
                 
                 update_preview_fn()
             else:
@@ -2655,7 +2840,7 @@ class MiningDashboard:
                                     parent=parent)
 
     def delete_current_profile(self, tracker: CharacterTracker, current_profile_var: tk.StringVar, 
-                               profile_menu: tk.OptionMenu, module_vars: List, update_preview_fn, parent_dialog=None):
+                               profile_menu: tk.OptionMenu, module_vars: List, update_preview_fn, parent_dialog=None, drone_vars=None):
         # Delete the current profile
         profile_to_delete = tracker.active_profile
         parent = parent_dialog or self.root
@@ -2701,6 +2886,13 @@ class MiningDashboard:
                     else:
                         mv['name_entry'].config(state="normal")
                 
+                # Load drone config for new active profile
+                if drone_vars:
+                    drone = tracker.get_active_drones()
+                    drone_vars['count'].set(str(drone.count) if drone.count > 0 else "")
+                    drone_vars['yield'].set(str(drone.yield_per_cycle) if drone.yield_per_cycle > 0 else "")
+                    drone_vars['cycle'].set(str(drone.cycle_time) if drone.cycle_time > 0 else "")
+                
                 update_preview_fn()
 
     def update_ship_indicator(self, char_id: str):
@@ -2729,8 +2921,18 @@ class MiningDashboard:
         theoretical_m3_per_sec = tracker.get_total_theoretical_m3_per_sec()
 
         if theoretical_m3_per_sec > 0:
+            # Build detail showing modules + drones
+            parts = []
+            mod_count = tracker.get_active_module_count()
+            if mod_count > 0:
+                parts.append(f"{mod_count}M")
+            drone = tracker.get_active_drones()
+            if drone.is_configured():
+                parts.append(f"{drone.count}D")
+            detail = "+".join(parts) if parts else ""
+            detail_str = f" [{detail}]" if detail else ""
             widgets['theoretical'].config(
-                text=f"◈ Theoretical: {theoretical_m3_per_sec:.2f} m3/s ({theoretical_m3_per_sec * 3600:,.0f} m3/hr)"
+                text=f"◈ Theoretical: {theoretical_m3_per_sec:.2f} m3/s ({theoretical_m3_per_sec * 3600:,.0f} m3/hr){detail_str}"
             )
         else:
             widgets['theoretical'].config(text="◈ Theoretical: -- m3/s (configure ship)")
