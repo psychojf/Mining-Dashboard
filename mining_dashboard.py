@@ -529,14 +529,11 @@ class MiningDashboard:
         self.root.geometry("")
 
     def _get_all_log_files(self) -> List[str]:
-        # Ensure DOCS ends with wildcard for glob
-        pattern = DOCS.rstrip('\\').rstrip('/')
-        if not pattern.endswith('*'):
-            pattern = os.path.join(pattern, '*')
-        main_files = glob.glob(pattern)
-        old_pattern = os.path.join(os.path.dirname(pattern.rstrip('*').rstrip('\\').rstrip('/')), "OLD", "*")
-        old_files = glob.glob(old_pattern)
-        return [f for f in main_files + old_files if f.lower().endswith('.txt')]
+        # Scan gamelogs directory and all subfolders
+        base_dir = DOCS.rstrip('\\').rstrip('/').rstrip('*')
+        pattern = os.path.join(base_dir, '**', '*')
+        all_files = glob.glob(pattern, recursive=True)
+        return [f for f in all_files if f.lower().endswith('.txt')]
 
     @staticmethod
     def _get_char_id_from_file(filepath: str) -> Optional[str]:
@@ -567,11 +564,10 @@ class MiningDashboard:
         # Return cached glob results, refresh only after TTL expires
         now = time.time()
         if now - self._glob_cache_time > self._glob_cache_ttl:
-            # Ensure DOCS ends with wildcard for glob
-            pattern = DOCS.rstrip('\\').rstrip('/')
-            if not pattern.endswith('*'):
-                pattern = os.path.join(pattern, '*')
-            self._glob_cache = [f for f in glob.glob(pattern) if f.lower().endswith('.txt')]
+            # Scan gamelogs directory and all subfolders
+            base_dir = DOCS.rstrip('\\').rstrip('/').rstrip('*')
+            pattern = os.path.join(base_dir, '**', '*')
+            self._glob_cache = [f for f in glob.glob(pattern, recursive=True) if f.lower().endswith('.txt')]
             self._glob_cache_time = now
         return self._glob_cache
 
