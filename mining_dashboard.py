@@ -2277,31 +2277,35 @@ class MiningDashboard:
         if not self.update_loop_running:
             return
 
-        for char_id, tracker in self.characters.items():
-            latest_log = self._get_latest_log_for_char(char_id)
-            if latest_log and latest_log != tracker.log_path:
-                tracker.log_path = latest_log
-                tracker.log_pos = 0
+        try:
+            for char_id, tracker in self.characters.items():
+                latest_log = self._get_latest_log_for_char(char_id)
+                if latest_log and latest_log != tracker.log_path:
+                    tracker.log_path = latest_log
+                    tracker.log_pos = 0
 
-            if tracker.log_path and os.path.exists(tracker.log_path):
-                try:
-                    with open(tracker.log_path, "r", encoding="utf-8-sig", errors="ignore") as f:
-                        f.seek(tracker.log_pos)
-                        new_data = f.read()
-                        new_pos = f.tell()
-                        if new_data:
-                            was_active = tracker.session_active
-                            self._process_log_data(tracker, new_data)
-                            # advance log_pos if session was active (even if auto-paused during processing)
-                            if was_active:
+                if tracker.log_path and os.path.exists(tracker.log_path):
+                    try:
+                        with open(tracker.log_path, "r", encoding="utf-8-sig", errors="ignore") as f:
+                            f.seek(tracker.log_pos)
+                            new_data = f.read()
+                            new_pos = f.tell()
+                            if new_data:
+                                was_active = tracker.session_active
+                                self._process_log_data(tracker, new_data)
+                                # advance log_pos if session was active (even if auto-paused during processing)
+                                if was_active:
+                                    tracker.log_pos = new_pos
+                            elif tracker.session_active:
                                 tracker.log_pos = new_pos
-                        elif tracker.session_active:
-                            tracker.log_pos = new_pos
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
 
-        self._update_ui_labels()
-        self.root.after(UPDATE_INTERVAL_MS, self.update_loop)
+            self._update_ui_labels()
+        except Exception:
+            pass
+        finally:
+            self.root.after(UPDATE_INTERVAL_MS, self.update_loop)
 
     def _process_log_data(self, tracker: CharacterTracker, data: str) -> None:
         # parse mining and compression events
@@ -2445,6 +2449,12 @@ class MiningDashboard:
                         tracker.log_pos = f.tell()
                 except Exception:
                     pass
+
+            # check if auto-pause triggered during backlog processing
+            if not tracker.session_active:
+                widgets['start_stop_btn'].config(text="▶ START", fg=GREEN)
+                return
+
             # set session baselines after backlog
             tracker.session_start_time = time.time()
             tracker.session_start_m3 = tracker.total_m3
