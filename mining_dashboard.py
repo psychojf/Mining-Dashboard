@@ -478,6 +478,62 @@ def _get_ore_excel_color(ore_name: str) -> str:
         return "00b894"
     return "ffffff"
 
+# ---------------------------------------------------------------------------
+# TOOLTIP HELPER
+# ---------------------------------------------------------------------------
+class ToolTip:
+    # lightweight hover tooltip for tkinter widgets (works on disabled buttons)
+    def __init__(self, widget, text=""):
+        self.widget = widget
+        self.text = text
+        self.tipwindow = None
+        self._after_id = None
+        widget.bind("<Enter>", self._on_enter, add="+")
+        widget.bind("<Leave>", self._on_leave, add="+")
+        widget.bind("<ButtonPress>", self._on_leave, add="+")
+
+    def update_text(self, new_text):
+        self.text = new_text
+
+    def _on_enter(self, event=None):
+        self._cancel()
+        self._after_id = self.widget.after(400, self._show)
+
+    def _on_leave(self, event=None):
+        self._cancel()
+        self._hide()
+
+    def _cancel(self):
+        if self._after_id:
+            self.widget.after_cancel(self._after_id)
+            self._after_id = None
+
+    def _show(self):
+        if not self.text:
+            return
+        x = self.widget.winfo_rootx() + self.widget.winfo_width() // 2
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self.tipwindow = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_attributes("-topmost", 1)
+        try:
+            tw.wm_attributes("-alpha", 0.92)
+        except Exception:
+            pass
+        tw.geometry(f"+{x}+{y}")
+        label = tk.Label(
+            tw, text=self.text, bg="#1a2332", fg="#c0d8e8",
+            font=("Consolas", 8), relief="solid", borderwidth=1,
+            padx=6, pady=3, wraplength=260, justify="left"
+        )
+        label.pack()
+
+    def _hide(self):
+        if self.tipwindow:
+            self.tipwindow.destroy()
+            self.tipwindow = None
+
+
 class MiningModule:
     def __init__(self, name: str = "", yield_per_cycle: float = 0.0, cycle_time: float = 0.0, enabled: bool = True):
         self.name = name
@@ -1090,9 +1146,8 @@ class MiningDashboard:
         fleet_frame.pack(fill="x")
 
         has_webhook = self._is_valid_webhook_url()
-        fg_send_init = CYAN if has_webhook else DIM
-        send_state = "normal" if has_webhook else "disabled"
 
+        # both buttons start disabled until session has mining data
         copy_btn = tk.Button(
             fleet_frame,
             text="⎘ Copy to Clipboard",
@@ -1103,25 +1158,32 @@ class MiningDashboard:
             relief="flat",
             cursor="hand2",
             width=18,
-            state="normal",
+            state="disabled",
             disabledforeground=DIM
         )
         copy_btn.pack(side="left", padx=(0, 4))
+        copy_tip = ToolTip(copy_btn, "No mining data yet \u2014 start mining to enable")
 
         send_btn = tk.Button(
             fleet_frame,
             text="▲ Send to Discord",
             command=lambda: self.show_send_report_dialog(char_id),
             bg=BG,
-            fg=fg_send_init,
+            fg=CYAN,
             font=("Consolas", 8, "bold"),
             relief="flat",
             cursor="hand2",
             width=18,
-            state=send_state,
+            state="disabled",
             disabledforeground=DIM
         )
         send_btn.pack(side="left")
+        # initial tooltip depends on webhook + data state
+        if not has_webhook:
+            send_tip_text = "No webhook URL configured \u2014 set it in \u2699 Config"
+        else:
+            send_tip_text = "No mining data yet \u2014 start mining to enable"
+        send_tip = ToolTip(send_btn, send_tip_text)
 
         # mining rates
         rate_frame = tk.Frame(col_inner, bg=BG_PANEL)
@@ -1188,7 +1250,9 @@ class MiningDashboard:
             'profile_label': profile_label,
             'fleet_frame': fleet_frame,
             'copy_btn': copy_btn,
-            'send_btn': send_btn
+            'send_btn': send_btn,
+            'copy_tip': copy_tip,
+            'send_tip': send_tip
         }
 
         return col_outer, widgets
@@ -2323,6 +2387,27 @@ class MiningDashboard:
                 summary = "Waiting..."
             w['summary'].config(text=summary)
     
+            # enable/disable copy+send buttons based on session data
+            has_data = bool(tracker.ore_summary)
+            has_webhook = self._is_valid_webhook_url()
+            if has_data:
+                w['copy_btn'].config(state="normal", fg=GOLD)
+                w['copy_tip'].update_text("Copy session report to clipboard")
+                if has_webhook:
+                    w['send_btn'].config(state="normal", fg=CYAN)
+                    w['send_tip'].update_text("Send session report to Discord webhook")
+                else:
+                    w['send_btn'].config(state="disabled", fg=DIM)
+                    w['send_tip'].update_text("No webhook URL configured \u2014 set it in \u2699 Config")
+            else:
+                w['copy_btn'].config(state="disabled", fg=DIM)
+                w['copy_tip'].update_text("No mining data yet \u2014 start mining to enable")
+                w['send_btn'].config(state="disabled", fg=DIM)
+                if not has_webhook:
+                    w['send_tip'].update_text("No mining data and no webhook URL configured")
+                else:
+                    w['send_tip'].update_text("No mining data yet \u2014 start mining to enable")
+
             self._update_rate_stats(char_id, tracker, w)
 
     # alerts
@@ -2391,6 +2476,15 @@ class MiningDashboard:
         widgets['ore'].config(text="Total: 0.0 m3")
         widgets['summary'].config(text="Waiting...")
         widgets['actual'].config(text="◉ Actual: -- m3/s")
+
+        # disable report buttons (no data after reset)
+        widgets['copy_btn'].config(state="disabled", fg=DIM)
+        widgets['copy_tip'].update_text("No mining data yet \u2014 start mining to enable")
+        widgets['send_btn'].config(state="disabled", fg=DIM)
+        if not self._is_valid_webhook_url():
+            widgets['send_tip'].update_text("No mining data and no webhook URL configured")
+        else:
+            widgets['send_tip'].update_text("No mining data yet \u2014 start mining to enable")
 
     # ship config
 
@@ -3959,14 +4053,28 @@ class MiningDashboard:
         return url.startswith("https://discord.com/api/webhooks/") or url.startswith("https://discordapp.com/api/webhooks/")
 
     def _update_send_button_states(self):
-        # toggle send buttons based on webhook availability
+        # toggle copy+send buttons based on webhook + session data
         has_webhook = self._is_valid_webhook_url()
         for cid, w in self.char_widgets.items():
-            w['copy_btn'].config(state="normal", fg=GOLD)
-            if has_webhook:
-                w['send_btn'].config(state="normal", fg=CYAN)
+            tracker = self.all_characters.get(cid)
+            has_data = bool(tracker and tracker.ore_summary)
+            if has_data:
+                w['copy_btn'].config(state="normal", fg=GOLD)
+                w['copy_tip'].update_text("Copy session report to clipboard")
+                if has_webhook:
+                    w['send_btn'].config(state="normal", fg=CYAN)
+                    w['send_tip'].update_text("Send session report to Discord webhook")
+                else:
+                    w['send_btn'].config(state="disabled", fg=DIM)
+                    w['send_tip'].update_text("No webhook URL configured \u2014 set it in \u2699 Config")
             else:
+                w['copy_btn'].config(state="disabled", fg=DIM)
+                w['copy_tip'].update_text("No mining data yet \u2014 start mining to enable")
                 w['send_btn'].config(state="disabled", fg=DIM)
+                if not has_webhook:
+                    w['send_tip'].update_text("No mining data and no webhook URL configured")
+                else:
+                    w['send_tip'].update_text("No mining data yet \u2014 start mining to enable")
 
     def _build_session_report_text(self, tracker: CharacterTracker) -> str:
         # plain text mining report
