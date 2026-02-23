@@ -1,7 +1,11 @@
+# -*- coding: utf-8 -*-
 import os
 import re
 import glob
 import json
+import zipfile
+import tempfile
+import threading
 import urllib.request
 import urllib.error
 from datetime import datetime, timedelta, timezone
@@ -32,7 +36,7 @@ try:
 except ImportError:
     HAS_OPENPYXL = False
 
-# --- CONFIG ---
+# config defaults
 DOCS = os.path.expanduser(r"~\Documents\EVE\logs\Gamelogs\*")
 CRIT_SOUND_FILE = "alert_crit.wav"
 CONFIG_FILE = "mining_config.json"
@@ -41,7 +45,13 @@ HISTORY_DAYS = 15
 CRITICAL_HIT_KEYWORD = "Critical mining success"
 MAX_MODULES = 5  # Maximum mining modules per ship
 
-# --- EVE ONLINE COLOR PALETTE ---
+# auto-pause keywords (notify events that should pause session)
+AUTO_PAUSE_KEYWORDS = [
+    "Targeting attempt failed as the designated object is no longer present",
+    "cargo hold is full","The asteroid is depleted",
+]
+
+# color palette
 BG = "#0b0e17"
 BG_PANEL = "#111827"
 BORDER = "#1e3a4a"
@@ -55,115 +65,350 @@ WHITE = "#ffffff"
 # colors per character
 CHAR_ACCENTS = [CYAN, "#ff9f43", "#a29bfe", "#e056fd", "#26de81", "#fc5c65", "#45aaf2", "#fed330"]
 
-# --- ORE VOLUME in m3 ---
-_ORE_DATA = [
-    # STANDARD ORES
-    ("Veldspar", 0.1), ("Scordite", 0.15), ("Pyroxeres", 0.3),
-    ("Plagioclase", 0.35), ("Omber", 0.6), ("Kernite", 1.2),
-    
-    # LOW-SEC ORES
-    ("Jaspet", 2.0), ("Hemorphite", 3.0), ("Hedbergite", 3.0),
-    
-    # NULL-SEC ORES
-    ("Gneiss", 5.0), ("Dark Ochre", 8.0),
-    ("Spodumain", 16.0), ("Crokite", 16.0), ("Bistot", 16.0),
-    ("Arkonor", 16.0), ("Mercoxit", 40.0),
-    
-    # MOON R4
-    ("Zeolites", 100.0), ("Sylvite", 100.0), ("Bitumens", 100.0), ("Coesite", 100.0),
-    
-    # MOON R8
-    ("Cobaltite", 100.0), ("Euxenite", 100.0), ("Titanite", 100.0), ("Scheelite", 100.0),
-    
-    # MOON R16
-    ("Otavite", 100.0), ("Sperrylite", 100.0), ("Vanadinite", 100.0), ("Chromite", 100.0),
-    
-    # MOON R32
-    ("Carnotite", 100.0), ("Zircon", 100.0), ("Pollucite", 100.0), ("Cinnabar", 100.0),
-    
-    # MOON R64
-    ("Xenotime", 100.0), ("Monazite", 100.0), ("Loparite", 100.0), ("Ytterbite", 100.0),
-    
-    # ICE ORES
-    ("Blue Ice", 1000.0), ("Clear Icicle", 1000.0), ("Glacial Mass", 1000.0),
-    ("White Glaze", 1000.0), ("Glare Crust", 1000.0), ("Dark Glitter", 1000.0),
-    ("Gelidus", 1000.0), ("Krystallos", 1000.0),
-    
-    # POCHVEN ORES
-    ("Bezdnacine", 16.0), ("Rakovene", 16.0), ("Talassonite", 16.0),
-    
-    # SPECIAL/RARE ORES
-    ("Ueganite", 5.0),        # Abyssal ore (compact!)
-    ("Prismaticite", 16.0),   # Rare ore
-    ("Ducinium", 16.0),       # Drifter ore
-    
-    # GAS CLOUDS - CYTOSEROCIN
-    ("Amber Cytoserocin", 10.0), ("Azure Cytoserocin", 10.0),
-    ("Celadon Cytoserocin", 10.0), ("Golden Cytoserocin", 10.0),
-    ("Lime Cytoserocin", 10.0), ("Vermillion Cytoserocin", 10.0),
-    ("Viridian Cytoserocin", 10.0),
-    
-    # GAS CLOUDS - MYKOSEROCIN
-    ("Amber Mykoserocin", 10.0), ("Azure Mykoserocin", 10.0),
-    ("Celadon Mykoserocin", 10.0), ("Golden Mykoserocin", 10.0),
-    ("Lime Mykoserocin", 10.0), ("Vermillion Mykoserocin", 10.0),
-    ("Viridian Mykoserocin", 10.0),
-    
-    # GAS CLOUDS - FULLERITES
-    ("Fullerite-C28", 5.0), ("Fullerite-C32", 5.0), ("Fullerite-C50", 5.0),
-    ("Fullerite-C60", 5.0), ("Fullerite-C70", 5.0), ("Fullerite-C72", 5.0),
-    ("Fullerite-C84", 10.0), ("Fullerite-C320", 10.0), ("Fullerite-C540", 10.0),
-]
-
-# Generate all ore variations
-ORE_VOLUMES: Dict[str, float] = {}
-GRADE_SUFFIXES = ["", " II-Grade", " III-Grade", " IV-Grade"]
-for ore_name, volume in _ORE_DATA:
-    suffixes = GRADE_SUFFIXES[:-1] if ore_name == "Mercoxit" else GRADE_SUFFIXES
-    for suffix in suffixes:
-        ORE_VOLUMES[f"{ore_name}{suffix}"] = volume
-
-# --- COMPRESSION RATIOS ---
-COMPRESSION_RATIOS = {
-    # Standard ores
-    "Veldspar": 100, "Scordite": 100, "Pyroxeres": 100,
-    "Plagioclase": 100, "Omber": 100, "Kernite": 100,
-    "Jaspet": 100, "Hemorphite": 100, "Hedbergite": 100,
-    "Gneiss": 100, "Dark Ochre": 100,
-    "Spodumain": 100, "Crokite": 100, "Bistot": 100,
-    "Arkonor": 100, "Mercoxit": 100,
-    
-    # Moon ores
-    "Zeolites": 100, "Sylvite": 100, "Bitumens": 100, "Coesite": 100,
-    "Cobaltite": 100, "Euxenite": 100, "Titanite": 100, "Scheelite": 100,
-    "Otavite": 100, "Sperrylite": 100, "Vanadinite": 100, "Chromite": 100,
-    "Carnotite": 100, "Zircon": 100, "Pollucite": 100, "Cinnabar": 100,
-    "Xenotime": 100, "Monazite": 100, "Loparite": 100, "Ytterbite": 100,
-    
-    # Special ores
-    "Ueganite": 100, "Prismaticite": 100, "Ducinium": 100,
-    "Bezdnacine": 100, "Rakovene": 100, "Talassonite": 100,
-    
-    # Ice (1:1 - already compressed)
-    "Blue Ice": 1, "Clear Icicle": 1, "Glacial Mass": 1,
-    "White Glaze": 1, "Glare Crust": 1, "Dark Glitter": 1,
-    "Gelidus": 1, "Krystallos": 1,
-    
-    # Gas clouds
-    "Amber Cytoserocin": 100, "Azure Cytoserocin": 100,
-    "Celadon Cytoserocin": 100, "Golden Cytoserocin": 100,
-    "Lime Cytoserocin": 100, "Vermillion Cytoserocin": 100,
-    "Viridian Cytoserocin": 100,
-    "Amber Mykoserocin": 100, "Azure Mykoserocin": 100,
-    "Celadon Mykoserocin": 100, "Golden Mykoserocin": 100,
-    "Lime Mykoserocin": 100, "Vermillion Mykoserocin": 100,
-    "Viridian Mykoserocin": 100,
-    "Fullerite-C28": 100, "Fullerite-C32": 100, "Fullerite-C50": 100,
-    "Fullerite-C60": 100, "Fullerite-C70": 100, "Fullerite-C72": 100,
-    "Fullerite-C84": 100, "Fullerite-C320": 100, "Fullerite-C540": 100,
+# ---------------------------------------------------------------------------
+# ORE / ICE / GAS DATA  (SDE-aware, auto-updatable)
+# Source: EVE Online SDE build 3215400 (Feb 19, 2026)
+# ---------------------------------------------------------------------------
+ORE_DATA_CACHE_FILE = "ore_data_cache.json"
+SDE_LATEST_URL = "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip"
+SDE_ASTEROID_CATEGORY_ID = 25
+SDE_GAS_GROUP_ID = 711
+SDE_SKIP_GROUPS = {
+    "Deadspace Asteroids", "Empire Asteroids", "Non-Interactable Asteroids",
+    "Scalable Decorative Asteroid", "Ancient Compressed Ice",
+    "AIR Ore Asteroid Resources"
 }
 
-# Pre-compiled regex patterns - OPTIMIZED
+# built-in defaults from EVE Online SDE build 3215400 (Feb 19, 2026)
+_DEFAULT_ORE_VOLUMES: Dict[str, float] = {
+    # Arkonor (16.0 m3)
+    "Arkonor": 16.0, "Arkonor II-Grade": 16.0,
+    "Arkonor III-Grade": 16.0, "Arkonor IV-Grade": 16.0, "Polygypsum": 16.0,
+    # Bezdnacine (16.0 m3) — Pochven
+    "Bezdnacine": 16.0, "Bezdnacine II-Grade": 16.0, "Bezdnacine III-Grade": 16.0,
+    # Bistot (16.0 m3)
+    "Bistot": 16.0, "Bistot II-Grade": 16.0,
+    "Bistot III-Grade": 16.0, "Bistot IV-Grade": 16.0,
+    # Common Moon (R8) (10.0 m3)
+    "Cobaltite": 10.0, "Copious Cobaltite": 10.0, "Twinkling Cobaltite": 10.0,
+    "Euxenite": 10.0, "Copious Euxenite": 10.0, "Twinkling Euxenite": 10.0,
+    "Scheelite": 10.0, "Copious Scheelite": 10.0, "Twinkling Scheelite": 10.0,
+    "Titanite": 10.0, "Copious Titanite": 10.0, "Twinkling Titanite": 10.0,
+    # Crokite (16.0 m3)
+    "Crokite": 16.0, "Crokite II-Grade": 16.0,
+    "Crokite III-Grade": 16.0, "Crokite IV-Grade": 16.0, "Geodite": 16.0,
+    # Dark Ochre (8.0 m3)
+    "Dark Ochre": 8.0, "Dark Ochre II-Grade": 8.0,
+    "Dark Ochre III-Grade": 8.0, "Dark Ochre IV-Grade": 8.0, "Oeryl": 8.0,
+    # Ducinium (16.0 m3)
+    "Ducinium": 16.0, "Ducinium II-Grade": 16.0,
+    "Ducinium III-Grade": 16.0, "Ducinium IV-Grade": 16.0,
+    # Eifyrium (16.0 m3)
+    "Eifyrium": 16.0, "Eifyrium II-Grade": 16.0,
+    "Eifyrium III-Grade": 16.0, "Eifyrium IV-Grade": 16.0,
+    # Exceptional Moon (R64) (10.0 m3)
+    "Xenotime": 10.0, "Bountiful Xenotime": 10.0, "Shining Xenotime": 10.0,
+    "Monazite": 10.0, "Bountiful Monazite": 10.0, "Shining Monazite": 10.0,
+    "Loparite": 10.0, "Bountiful Loparite": 10.0, "Shining Loparite": 10.0,
+    "Ytterbite": 10.0, "Bountiful Ytterbite": 10.0, "Shining Ytterbite": 10.0,
+    # Gneiss (5.0 m3)
+    "Gneiss": 5.0, "Gneiss II-Grade": 5.0,
+    "Gneiss III-Grade": 5.0, "Gneiss IV-Grade": 5.0, "Green Arisite": 5.0,
+    # Griemeer (0.8 m3)
+    "Griemeer": 0.8, "Griemeer II-Grade": 0.8,
+    "Griemeer III-Grade": 0.8, "Griemeer IV-Grade": 0.8,
+    # Gas — Cytoserocin (10.0 m3)
+    "Amber Cytoserocin": 10.0, "Azure Cytoserocin": 10.0,
+    "Celadon Cytoserocin": 10.0, "Chartreuse Cytoserocin": 10.0,
+    "Gamboge Cytoserocin": 10.0, "Golden Cytoserocin": 10.0,
+    "Lime Cytoserocin": 10.0, "Malachite Cytoserocin": 10.0,
+    "Vermillion Cytoserocin": 10.0, "Viridian Cytoserocin": 10.0,
+    # Gas — Mykoserocin (10.0 m3)
+    "Amber Mykoserocin": 10.0, "Azure Mykoserocin": 10.0,
+    "Celadon Mykoserocin": 10.0, "Golden Mykoserocin": 10.0,
+    "Lime Mykoserocin": 10.0, "Malachite Mykoserocin": 10.0,
+    "Vermillion Mykoserocin": 10.0, "Viridian Mykoserocin": 10.0,
+    # Gas — Fullerites
+    "Fullerite-C28": 2.0, "Fullerite-C32": 5.0, "Fullerite-C50": 1.0,
+    "Fullerite-C60": 1.0, "Fullerite-C70": 1.0, "Fullerite-C72": 2.0,
+    "Fullerite-C84": 2.0, "Fullerite-C320": 5.0, "Fullerite-C540": 10.0,
+    "Hiemal Tricarboxyl Vapor": 10.0,
+    # Hedbergite (3.0 m3)
+    "Hedbergite": 3.0, "Hedbergite II-Grade": 3.0,
+    "Hedbergite III-Grade": 3.0, "Hedbergite IV-Grade": 3.0,
+    # Hemorphite (3.0 m3)
+    "Hemorphite": 3.0, "Hemorphite II-Grade": 3.0,
+    "Hemorphite III-Grade": 3.0, "Hemorphite IV-Grade": 3.0,
+    # Hezorime (5.0 m3)
+    "Hezorime": 5.0, "Hezorime II-Grade": 5.0,
+    "Hezorime III-Grade": 5.0, "Hezorime IV-Grade": 5.0,
+    # Ice (1000.0 m3)
+    "Blue Ice": 1000.0, "Blue Ice IV-Grade": 1000.0,
+    "Clear Icicle": 1000.0, "Clear Icicle IV-Grade": 1000.0,
+    "Glacial Mass": 1000.0, "Glacial Mass IV-Grade": 1000.0,
+    "White Glaze": 1000.0, "White Glaze IV-Grade": 1000.0,
+    "Dark Glitter": 1000.0, "Gelidus": 1000.0,
+    "Glare Crust": 1000.0, "Krystallos": 1000.0,
+    "Azure Ice": 1000.0, "Crystalline Icicle": 1000.0,
+    # Jaspet (2.0 m3)
+    "Jaspet": 2.0, "Jaspet II-Grade": 2.0,
+    "Jaspet III-Grade": 2.0, "Jaspet IV-Grade": 2.0, "Pithix": 2.0,
+    # Kernite (1.2 m3)
+    "Kernite": 1.2, "Kernite II-Grade": 1.2,
+    "Kernite III-Grade": 1.2, "Kernite IV-Grade": 1.2, "Lyavite": 1.2,
+    # Kylixium (1.2 m3)
+    "Kylixium": 1.2, "Kylixium II-Grade": 1.2,
+    "Kylixium III-Grade": 1.2, "Kylixium IV-Grade": 1.2,
+    # Mercoxit (40.0 m3)
+    "Mercoxit": 40.0, "Mercoxit II-Grade": 40.0,
+    "Mercoxit III-Grade": 40.0, "Zuthrine": 40.0,
+    # Mordunium (0.1 m3)
+    "Mordunium": 0.1, "Mordunium II-Grade": 0.1,
+    "Mordunium III-Grade": 0.1, "Mordunium IV-Grade": 0.1,
+    # Mutanite (4.0 m3)
+    "Admixti Mutanite": 4.0, "Amperum Mutanite": 4.0,
+    "Conflagrati Mutanite": 4.0, "Peregrinus Mutanite": 4.0,
+    "Solis Mutanite": 4.0, "Tenebraet Mutanite": 4.0,
+    # Nocxite (4.0 m3)
+    "Nocxite": 4.0, "Nocxite II-Grade": 4.0,
+    "Nocxite III-Grade": 4.0, "Nocxite IV-Grade": 4.0,
+    # Omber (0.6 m3)
+    "Omber": 0.6, "Omber II-Grade": 0.6,
+    "Omber III-Grade": 0.6, "Omber IV-Grade": 0.6, "Mercium": 0.6,
+    # Plagioclase (0.35 m3)
+    "Plagioclase": 0.35, "Plagioclase II-Grade": 0.35,
+    "Plagioclase III-Grade": 0.35, "Plagioclase IV-Grade": 0.35,
+    # Pyroxeres (0.3 m3)
+    "Pyroxeres": 0.3, "Pyroxeres II-Grade": 0.3,
+    "Pyroxeres III-Grade": 0.3, "Pyroxeres IV-Grade": 0.3, "Augumene": 0.3,
+    # Rakovene (16.0 m3) — Pochven
+    "Rakovene": 16.0, "Rakovene II-Grade": 16.0,
+    "Rakovene III-Grade": 16.0, "Nesosilicate Rakovene": 0.5,
+    # Rare Moon (R32) (10.0 m3)
+    "Carnotite": 10.0, "Glowing Carnotite": 10.0, "Replete Carnotite": 10.0,
+    "Cinnabar": 10.0, "Glowing Cinnabar": 10.0, "Replete Cinnabar": 10.0,
+    "Pollucite": 10.0, "Glowing Pollucite": 10.0, "Replete Pollucite": 10.0,
+    "Zircon": 10.0, "Glowing Zircon": 10.0, "Replete Zircon": 10.0,
+    # Scordite (0.15 m3)
+    "Scordite": 0.15, "Scordite II-Grade": 0.15,
+    "Scordite III-Grade": 0.15, "Scordite IV-Grade": 0.15,
+    # Spodumain (16.0 m3)
+    "Spodumain": 16.0, "Spodumain II-Grade": 16.0,
+    "Spodumain III-Grade": 16.0, "Spodumain IV-Grade": 16.0,
+    # Talassonite (16.0 m3) — Pochven
+    "Talassonite": 16.0, "Talassonite II-Grade": 16.0, "Talassonite III-Grade": 16.0,
+    # Tyranite (0.6 m3)
+    "Tyranite": 0.6,
+    # Ubiquitous Moon (R4) (10.0 m3)
+    "Zeolites": 10.0, "Brimful Zeolites": 10.0, "Glistening Zeolites": 10.0,
+    "Sylvite": 10.0, "Brimful Sylvite": 10.0, "Glistening Sylvite": 10.0,
+    "Bitumens": 10.0, "Brimful Bitumens": 10.0, "Glistening Bitumens": 10.0,
+    "Coesite": 10.0, "Brimful Coesite": 10.0, "Glistening Coesite": 10.0,
+    # Ueganite (5.0 m3)
+    "Ueganite": 5.0, "Ueganite II-Grade": 5.0,
+    "Ueganite III-Grade": 5.0, "Ueganite IV-Grade": 5.0,
+    # Uncommon Moon (R16) (10.0 m3)
+    "Chromite": 10.0, "Lavish Chromite": 10.0, "Shimmering Chromite": 10.0,
+    "Otavite": 10.0, "Lavish Otavite": 10.0, "Shimmering Otavite": 10.0,
+    "Sperrylite": 10.0, "Lavish Sperrylite": 10.0, "Shimmering Sperrylite": 10.0,
+    "Vanadinite": 10.0, "Lavish Vanadinite": 10.0, "Shimmering Vanadinite": 10.0,
+    # Veldspar (0.1 m3)
+    "Veldspar": 0.1, "Veldspar II-Grade": 0.1,
+    "Veldspar III-Grade": 0.1, "Veldspar IV-Grade": 0.1, "Banidine": 0.1,
+    # Ytirium (0.6 m3)
+    "Ytirium": 0.6, "Ytirium II-Grade": 0.6,
+    "Ytirium III-Grade": 0.6, "Ytirium IV-Grade": 0.6,
+}
+
+# compression ratios from SDE compressibleTypes.jsonl
+_DEFAULT_COMPRESSION_RATIOS: Dict[str, int] = {}
+for _ore_name in _DEFAULT_ORE_VOLUMES:
+    _DEFAULT_COMPRESSION_RATIOS[_ore_name] = 100
+# named variants: 1:1 (no compression entry in SDE)
+for _n in ["Polygypsum", "Geodite", "Oeryl", "Green Arisite", "Pithix",
+           "Lyavite", "Zuthrine", "Mercium", "Augumene", "Banidine",
+           "Nesosilicate Rakovene", "Tyranite",
+           "Admixti Mutanite", "Amperum Mutanite", "Conflagrati Mutanite",
+           "Peregrinus Mutanite", "Solis Mutanite", "Tenebraet Mutanite",
+           "Azure Ice", "Crystalline Icicle",
+           "Chartreuse Cytoserocin", "Gamboge Cytoserocin",
+           "Hiemal Tricarboxyl Vapor"]:
+    if _n in _DEFAULT_COMPRESSION_RATIOS:
+        _DEFAULT_COMPRESSION_RATIOS[_n] = 1
+# ice: 10:1
+for _n in ["Blue Ice", "Blue Ice IV-Grade", "Clear Icicle", "Clear Icicle IV-Grade",
+           "Glacial Mass", "Glacial Mass IV-Grade", "White Glaze", "White Glaze IV-Grade",
+           "Dark Glitter", "Gelidus", "Glare Crust", "Krystallos"]:
+    _DEFAULT_COMPRESSION_RATIOS[_n] = 10
+# gas/fullerites: 10:1 (except 1:1 above)
+for _n in _DEFAULT_COMPRESSION_RATIOS:
+    if ("Cytoserocin" in _n or "Mykoserocin" in _n or "Fullerite" in _n):
+        if _DEFAULT_COMPRESSION_RATIOS[_n] != 1:
+            _DEFAULT_COMPRESSION_RATIOS[_n] = 10
+
+
+# ---------------------------------------------------------------------------
+# SDE ORE DATA UPDATE SYSTEM
+# ---------------------------------------------------------------------------
+def _load_ore_data_from_cache():
+    # load cached SDE ore data from JSON file
+    try:
+        if os.path.exists(ORE_DATA_CACHE_FILE):
+            with open(ORE_DATA_CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
+
+def _save_ore_data_cache(data):
+    # save ore data to JSON cache file
+    try:
+        with open(ORE_DATA_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"Warning: could not save ore data cache: {e}")
+
+
+def _parse_sde_ore_data(sde_dir):
+    # parse extracted SDE JSONL files, return dict with ore volumes + compression
+    categories = {}
+    cat_path = os.path.join(sde_dir, "categories.jsonl")
+    with open(cat_path, "r", encoding="utf-8") as f:
+        for line in f:
+            obj = json.loads(line)
+            categories[obj["_key"]] = obj.get("name", {}).get("en", "")
+
+    groups = {}
+    grp_path = os.path.join(sde_dir, "groups.jsonl")
+    with open(grp_path, "r", encoding="utf-8") as f:
+        for line in f:
+            obj = json.loads(line)
+            groups[obj["_key"]] = {
+                "name": obj.get("name", {}).get("en", ""),
+                "categoryID": obj.get("categoryID", 0),
+                "published": obj.get("published", False)
+            }
+
+    compress_map = {}
+    comp_path = os.path.join(sde_dir, "compressibleTypes.jsonl")
+    with open(comp_path, "r", encoding="utf-8") as f:
+        for line in f:
+            obj = json.loads(line)
+            compress_map[obj["_key"]] = obj["compressedTypeID"]
+
+    types_by_id = {}
+    types_path = os.path.join(sde_dir, "types.jsonl")
+    with open(types_path, "r", encoding="utf-8") as f:
+        for line in f:
+            obj = json.loads(line)
+            types_by_id[obj["_key"]] = obj
+
+    asteroid_groups = {}
+    for gid, g in groups.items():
+        if g["categoryID"] == SDE_ASTEROID_CATEGORY_ID and g["published"]:
+            if g["name"] not in SDE_SKIP_GROUPS:
+                asteroid_groups[gid] = g["name"]
+
+    ore_volumes = {}
+    compression_ratios = {}
+    for tid, t in types_by_id.items():
+        if not t.get("published"):
+            continue
+        name = t.get("name", {}).get("en", "")
+        vol = t.get("volume", 0)
+        gid = t.get("groupID", 0)
+        if "Compressed" in name:
+            continue
+        if gid not in asteroid_groups and gid != SDE_GAS_GROUP_ID:
+            continue
+        comp_ratio = 1
+        if tid in compress_map:
+            comp_type = types_by_id.get(compress_map[tid])
+            if comp_type and vol > 0:
+                cv = comp_type.get("volume", 0)
+                if cv > 0:
+                    comp_ratio = round(vol / cv)
+        ore_volumes[name] = vol
+        compression_ratios[name] = comp_ratio
+
+    sde_version = ""
+    sde_meta = os.path.join(sde_dir, "_sde.jsonl")
+    if os.path.exists(sde_meta):
+        with open(sde_meta, "r", encoding="utf-8") as f:
+            for line in f:
+                obj = json.loads(line)
+                sde_version = str(obj.get("buildNumber", obj.get("_key", "")))
+
+    return {
+        "sde_version": sde_version,
+        "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "ore_count": len(ore_volumes),
+        "ore_volumes": ore_volumes,
+        "compression_ratios": compression_ratios
+    }
+
+
+def download_and_parse_sde(progress_callback=None):
+    # download latest SDE from CCP and parse ore/ice/gas data
+    if progress_callback:
+        progress_callback("Downloading SDE from CCP...")
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        zip_path = os.path.join(tmp_dir, "sde.zip")
+        req = urllib.request.Request(SDE_LATEST_URL, headers={
+            "User-Agent": "EVE-Mining-Dashboard/1.0"
+        })
+        response = urllib.request.urlopen(req, timeout=120)
+        total = int(response.headers.get("Content-Length", 0))
+        downloaded = 0
+        with open(zip_path, "wb") as f:
+            while True:
+                chunk = response.read(256 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                if progress_callback and total > 0:
+                    pct = int(downloaded * 100 / total)
+                    mb = downloaded / (1024 * 1024)
+                    progress_callback(f"Downloading SDE... {mb:.1f} MB ({pct}%)")
+
+        if progress_callback:
+            progress_callback("Extracting SDE data...")
+        needed = ["types.jsonl", "groups.jsonl", "categories.jsonl",
+                  "compressibleTypes.jsonl", "_sde.jsonl"]
+        extract_dir = os.path.join(tmp_dir, "sde")
+        os.makedirs(extract_dir, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            for name in needed:
+                if name in zf.namelist():
+                    zf.extract(name, extract_dir)
+
+        if progress_callback:
+            progress_callback("Parsing ore data...")
+        return _parse_sde_ore_data(extract_dir)
+
+
+# initialize ore data: cache first, then built-in defaults
+ORE_VOLUMES: Dict[str, float] = {}
+COMPRESSION_RATIOS: Dict[str, int] = {}
+SDE_INFO: Dict[str, str] = {"version": "built-in", "updated_at": "n/a", "ore_count": "0"}
+
+_cached = _load_ore_data_from_cache()
+if _cached and "ore_volumes" in _cached:
+    ORE_VOLUMES = {k: float(v) for k, v in _cached["ore_volumes"].items()}
+    COMPRESSION_RATIOS = {k: int(v) for k, v in _cached["compression_ratios"].items()}
+    SDE_INFO["version"] = _cached.get("sde_version", "cached")
+    SDE_INFO["updated_at"] = _cached.get("updated_at", "unknown")
+    SDE_INFO["ore_count"] = str(_cached.get("ore_count", len(ORE_VOLUMES)))
+else:
+    ORE_VOLUMES = dict(_DEFAULT_ORE_VOLUMES)
+    COMPRESSION_RATIOS = dict(_DEFAULT_COMPRESSION_RATIOS)
+    SDE_INFO["version"] = "3215400 (built-in)"
+    SDE_INFO["ore_count"] = str(len(ORE_VOLUMES))
+
+
+# regex patterns
 MINING_LINE = re.compile(r'^\[.*?\]\s+\(mining\)', re.IGNORECASE)
 
 REGULAR_MINE_PATTERN = re.compile(
@@ -181,14 +426,13 @@ COMPRESSION_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# Character detection patterns (split on '_', char ID is 3rd segment)
+# character detection pattern
 LISTENER_LINE = re.compile(r'Listener:\s*(.+)', re.IGNORECASE)
 
-# Timestamp pattern for date extraction from log lines
+# timestamp pattern
 LOG_TIMESTAMP = re.compile(r'^\[\s*(\d{4}\.\d{2}\.\d{2})\s+\d{2}:\d{2}:\d{2}\s*\]')
 
-# --- ORE CATEGORY COLORS FOR EXCEL ---
-# Maps ore base name to a hex color for Excel styling
+# ore category colors for excel
 _ORE_CATEGORIES = {
     # Standard (green)
     "Veldspar": "2ecc40", "Scordite": "2ecc40", "Pyroxeres": "2ecc40",
@@ -214,12 +458,16 @@ _ORE_CATEGORIES = {
     "Gelidus": "74b9ff", "Krystallos": "74b9ff",
     # Pochven (teal)
     "Bezdnacine": "00cec9", "Rakovene": "00cec9", "Talassonite": "00cec9",
+    # New ores (cyan-green)
+    "Mordunium": "00d2d3", "Ytirium": "00d2d3", "Eifyrium": "00d2d3",
+    "Griemeer": "00d2d3", "Hezorime": "00d2d3", "Kylixium": "00d2d3",
+    "Nocxite": "00d2d3", "Tyranite": "00d2d3",
     # Special (bright gold)
-    "Ueganite": "ffeaa7", "Prismaticite": "ffeaa7", "Ducinium": "ffeaa7",
+    "Ducinium": "ffeaa7", "Ueganite": "ffeaa7", "Mutanite": "ffeaa7",
 }
 
 def _get_ore_excel_color(ore_name: str) -> str:
-    # Return hex color for an ore name (checks base name match)
+    # hex color for ore name
     for base_name, color in _ORE_CATEGORIES.items():
         if base_name.lower() in ore_name.lower():
             return color
@@ -304,13 +552,13 @@ class CharacterTracker:
         self.ore_summary: Dict[str, float] = {}
         self.compression_log: Dict[str, float] = {}
         
-        # Multiple ship profiles support
+        # ship profiles
         self.ship_profiles: Dict[str, List[MiningModule]] = {"Default": []}
-        # Drone config per profile
+        # drone config
         self.drone_profiles: Dict[str, MiningDrone] = {"Default": MiningDrone()}
-        # Implant config per profile (Highwall MX-1005 = +5% mining yield on modules only)
+        # implant config (Highwall MX-1005 +5%)
         self.implant_profiles: Dict[str, bool] = {"Default": False}
-        # Crit config per profile (chance % and bonus yield %)
+        # crit config (chance % and bonus %)
         self.crit_profiles: Dict[str, Dict[str, float]] = {"Default": {"chance": 0.0, "bonus": 0.0}}
         self.active_profile: str = "Default"
         
@@ -319,35 +567,28 @@ class CharacterTracker:
         self.session_active: bool = False
 
     def get_active_modules(self) -> List[MiningModule]:
-        # Get the modules for the currently active profile
+        # modules for active profile
         return self.ship_profiles.get(self.active_profile, [])
 
     def set_active_modules(self, modules: List[MiningModule]):
-        # Set modules for the currently active profile
         self.ship_profiles[self.active_profile] = modules
 
     def get_active_drones(self) -> MiningDrone:
-        # Get the drone config for the currently active profile
         return self.drone_profiles.get(self.active_profile, MiningDrone())
 
     def set_active_drones(self, drone: MiningDrone):
-        # Set drone config for the currently active profile
         self.drone_profiles[self.active_profile] = drone
 
     def get_active_implant(self) -> bool:
-        # Get Highwall implant state for the currently active profile
         return self.implant_profiles.get(self.active_profile, False)
 
     def set_active_implant(self, enabled: bool):
-        # Set Highwall implant state for the currently active profile
         self.implant_profiles[self.active_profile] = enabled
 
     def get_active_crit(self) -> Dict[str, float]:
-        # Get crit config for the currently active profile
         return self.crit_profiles.get(self.active_profile, {"chance": 0.0, "bonus": 0.0})
 
     def set_active_crit(self, chance: float, bonus: float):
-        # Set crit config for the currently active profile
         self.crit_profiles[self.active_profile] = {"chance": chance, "bonus": bonus}
 
     def get_total_theoretical_m3_per_sec(self) -> float:
@@ -356,15 +597,15 @@ class CharacterTracker:
         for module in self.get_active_modules():
             if module.enabled and module.is_configured():
                 module_total += module.get_m3_per_sec()
-        # Apply Highwall MX-1005 implant bonus (+5%) to modules only
+        # apply Highwall implant bonus (+5%) to modules
         if self.get_active_implant():
             module_total *= 1.05
-        # Apply critical hit average yield to modules only
+        # apply crit avg yield to modules
         crit = self.get_active_crit()
         if crit["chance"] > 0 and crit["bonus"] > 0:
             module_total *= (1 + (crit["chance"] / 100.0) * (crit["bonus"] / 100.0))
         total += module_total
-        # Add drone contribution (not affected by implant or crits)
+        # add drone contribution (no implant/crit bonus)
         drone = self.get_active_drones()
         if drone.is_configured():
             total += drone.get_total_m3_per_sec()
@@ -379,11 +620,9 @@ class CharacterTracker:
         return has_module or has_drone
 
     def get_profile_names(self) -> List[str]:
-        # Get list of all profile names
         return list(self.ship_profiles.keys())
 
     def create_profile(self, name: str):
-        # Create a new empty profile
         if name and name not in self.ship_profiles:
             self.ship_profiles[name] = []
             self.drone_profiles[name] = MiningDrone()
@@ -393,10 +632,9 @@ class CharacterTracker:
         return False
 
     def delete_profile(self, name: str) -> bool:
-        # Delete a profile (cannot delete if it's the only one)
         if name in self.ship_profiles and len(self.ship_profiles) > 1:
             if self.active_profile == name:
-                # Switch to another profile before deleting
+                # switch to another profile first
                 for profile_name in self.ship_profiles:
                     if profile_name != name:
                         self.active_profile = profile_name
@@ -412,7 +650,6 @@ class CharacterTracker:
         return False
 
     def rename_profile(self, old_name: str, new_name: str) -> bool:
-        # Rename a profile
         if old_name in self.ship_profiles and new_name and new_name not in self.ship_profiles:
             self.ship_profiles[new_name] = self.ship_profiles.pop(old_name)
             if old_name in self.drone_profiles:
@@ -443,12 +680,12 @@ class MiningDashboard:
         self.app_config = self.load_config()
         self._apply_saved_app_settings()
 
-        # Fleet mode settings
+        # fleet mode
         fleet_cfg = self.app_config.get("fleet", {})
         self.fleet_mode = fleet_cfg.get("enabled", False)
         self.fleet_webhook_url = fleet_cfg.get("webhook_url", "")
 
-        # Set position from saved geometry
+        # restore position
         saved_geom = self.app_config.get("win_geom", "+100+100")
         try:
             if '+' in saved_geom:
@@ -462,52 +699,50 @@ class MiningDashboard:
         except:
             self.root.geometry("+100+100")
 
-        # Glob cache to avoid scanning gamelogs directory every tick
+        # glob cache
         self._glob_cache: List[str] = []
         self._glob_cache_time: float = 0.0
-        self._glob_cache_ttl: float = 5.0  # refresh every 5 seconds
+        self._glob_cache_ttl: float = 5.0  # refresh interval
 
-        # Discover characters from gamelogs
+        # discover characters
         self.all_characters = self.discover_all_characters()
 
-        # Filter to only visible characters
+        # visible characters only
         self.characters = self.get_visible_characters()
 
-        # Load ship fitting data from config
+        # load ship configs
         self.load_ship_configs()
 
-        # Initialize log tracking per character
+        # init log tracking
         for tracker in self.all_characters.values():
             tracker.log_path = self._get_latest_log_for_char(tracker.char_id)
             if tracker.log_path:
                 tracker.log_pos = os.path.getsize(tracker.log_path)
 
-        # Per-character UI widgets
+        # UI widgets per character
         self.char_widgets: Dict[str, Dict] = {}
 
-        # Store reference to chars_container for rebuilding
+        # chars container ref
         self.chars_container = None
 
         self.setup_ui()
 
-        # Initialize windows
+        # window refs
         self.history_window = None
         self.ship_config_dialogs: Dict[str, tk.Toplevel] = {}
         self.config_dialog: Optional[tk.Toplevel] = None
 
-        # Flag to control update loop
+        # update loop flag
         self.update_loop_running = True
 
-        # Bind drag events
+        # drag events
         self.root.bind("<Button-1>", self._start_drag)
         self.root.bind("<B1-Motion>", self._do_drag)
 
         self.update_loop()
         self.root.mainloop()
 
-    # --------------------- #
-    #  CHARACTER DISCOVERY  #
-    # --------------------- #
+    # character discovery
 
     def discover_all_characters(self) -> Dict[str, CharacterTracker]:
         char_names: Dict[str, str] = {}
@@ -571,7 +806,7 @@ class MiningDashboard:
                 self.char_widgets[char_id] = widgets
                 self.update_ship_indicator(char_id)
                 
-                # Restore session button state after rebuild
+                # restore session button state
                 if tracker.session_active:
                     widgets['start_stop_btn'].config(text="■ STOP", fg=RED)
 
@@ -579,7 +814,7 @@ class MiningDashboard:
         self.root.geometry("")
 
     def _get_all_log_files(self) -> List[str]:
-        # Scan gamelogs directory and all subfolders
+        # scan gamelogs dir recursively
         base_dir = DOCS.rstrip('\\').rstrip('/').rstrip('*')
         pattern = os.path.join(base_dir, '**', '*')
         all_files = glob.glob(pattern, recursive=True)
@@ -587,7 +822,7 @@ class MiningDashboard:
 
     @staticmethod
     def _get_char_id_from_file(filepath: str) -> Optional[str]:
-        # Split filename on '_' and check after the second underscore
+        # extract char ID from filename
         basename = os.path.splitext(os.path.basename(filepath))[0]
         parts = basename.split('_')
         if len(parts) >= 3:
@@ -611,10 +846,9 @@ class MiningDashboard:
         return None
 
     def _get_cached_log_files(self) -> List[str]:
-        # Return cached glob results, refresh only after TTL expires
+        # cached glob results with TTL
         now = time.time()
         if now - self._glob_cache_time > self._glob_cache_ttl:
-            # Scan gamelogs directory and all subfolders
             base_dir = DOCS.rstrip('\\').rstrip('/').rstrip('*')
             pattern = os.path.join(base_dir, '**', '*')
             self._glob_cache = [f for f in glob.glob(pattern, recursive=True) if f.lower().endswith('.txt')]
@@ -629,9 +863,7 @@ class MiningDashboard:
         ]
         return max(char_files, key=os.path.getmtime) if char_files else None
 
-    # ------ #
-    #  DRAG  #
-    # ------ #
+    # drag handlers
 
     def _start_drag(self, event):
         widget = event.widget
@@ -652,9 +884,7 @@ class MiningDashboard:
         y = self.root.winfo_y() + event.y - self._drag_y
         self.root.geometry(f"+{x}+{y}")
 
-    # --------- #
-    #  MAIN UI  #
-    # --------- #
+    # main ui
 
     def setup_ui(self) -> None:
         border_frame = tk.Frame(self.root, bg=BORDER, padx=1, pady=1)
@@ -663,7 +893,7 @@ class MiningDashboard:
         self.inner_frame = tk.Frame(border_frame, bg=BG)
         self.inner_frame.pack(fill="both", expand=True)
 
-        # Top bar with title and buttons
+        # top bar
         top_bar = tk.Frame(self.inner_frame, bg=BG, pady=8, padx=10)
         top_bar.pack(fill="x")
 
@@ -675,7 +905,6 @@ class MiningDashboard:
             font=("Consolas", 11, "bold")
         ).pack(side="left")
 
-        # Close button
         close_btn = tk.Label(
             top_bar,
             text="✕",
@@ -689,7 +918,7 @@ class MiningDashboard:
         close_btn.bind("<Enter>", lambda e: close_btn.config(fg=RED))
         close_btn.bind("<Leave>", lambda e: close_btn.config(fg=DIM))
 
-        # Config gear icon
+        # config gear
         self.config_icon = tk.Label(
             top_bar,
             text="⚙",
@@ -703,7 +932,7 @@ class MiningDashboard:
         self.config_icon.bind("<Enter>", lambda e: self.config_icon.config(fg=CYAN))
         self.config_icon.bind("<Leave>", lambda e: self.config_icon.config(fg=DIM))
 
-        # Character columns container
+        # character columns
         self.chars_container = tk.Frame(self.inner_frame, bg=BG)
         self.chars_container.pack(fill="both", padx=5, pady=(5, 0))
 
@@ -723,7 +952,7 @@ class MiningDashboard:
                 self.char_widgets[char_id] = widgets
                 self.update_ship_indicator(char_id)
 
-        # History button
+        # history button
         self.history_button = tk.Button(
             self.inner_frame,
             text="◈ HISTORY",
@@ -756,7 +985,7 @@ class MiningDashboard:
 
         col_inner.bind("<Button-3>", show_context_menu)
 
-        # Character name header with ship config indicator
+        # character name header
         name_frame = tk.Frame(col_inner, bg=BG_PANEL)
         name_frame.pack(fill="x", pady=(0, 5))
         name_frame.bind("<Button-3>", show_context_menu)
@@ -771,18 +1000,22 @@ class MiningDashboard:
         char_name_label.pack(side="left")
         char_name_label.bind("<Button-3>", show_context_menu)
 
-        # Active profile indicator
+        # profile indicator
         profile_label = tk.Label(
             name_frame,
-            text=f"〈{tracker.active_profile}〉",
+            text=f"\u3008{tracker.active_profile}\u3009",
             fg=GOLD,
             bg=BG_PANEL,
-            font=("Consolas", 8)
+            font=("Consolas", 8),
+            cursor="hand2"
         )
         profile_label.pack(side="left", padx=(5, 0))
+        profile_label.bind("<Button-1>", lambda e, cid=char_id: self.show_profile_picker(cid, e))
         profile_label.bind("<Button-3>", show_context_menu)
+        profile_label.bind("<Enter>", lambda e: profile_label.config(fg=CYAN))
+        profile_label.bind("<Leave>", lambda e: profile_label.config(fg=GOLD))
 
-        # Ship config indicator
+        # ship indicator
         ship_indicator = tk.Label(
             name_frame,
             text="◆",
@@ -793,7 +1026,7 @@ class MiningDashboard:
         ship_indicator.pack(side="right")
         ship_indicator.bind("<Button-3>", show_context_menu)
 
-        # Stats frame
+        # stats
         stats_frame = tk.Frame(col_inner, bg=BG_PANEL)
         stats_frame.pack(fill="x")
         stats_frame.bind("<Button-3>", show_context_menu)
@@ -818,7 +1051,7 @@ class MiningDashboard:
         ore_label.pack(anchor="w", pady=2)
         ore_label.bind("<Button-3>", show_context_menu)
 
-        # Control buttons frame
+        # control buttons
         control_frame = tk.Frame(col_inner, bg=BG_PANEL)
         control_frame.pack(fill="x", pady=(5, 0))
         control_frame.bind("<Button-3>", show_context_menu)
@@ -849,84 +1082,48 @@ class MiningDashboard:
         )
         reset_btn.pack(side="left")
 
-        # Fleet report frame (always visible)
+        # fleet report frame
         fleet_outer = tk.Frame(col_inner, bg=BORDER, padx=1, pady=1)
         fleet_outer.pack(fill="x", pady=(6, 0))
 
         fleet_frame = tk.Frame(fleet_outer, bg=BG_PANEL, padx=6, pady=4)
         fleet_frame.pack(fill="x")
 
-        fleet_var = tk.BooleanVar(value=self.fleet_mode)
-
-        def on_fleet_toggle(*args):
-            enabled = fleet_var.get()
-            self.fleet_mode = enabled
-            # Update config
-            fleet_cfg = self.app_config.get("fleet", {})
-            fleet_cfg["enabled"] = enabled
-            self.app_config["fleet"] = fleet_cfg
-            self.save_config()
-            # Sync all character columns
-            for cid, w in self.char_widgets.items():
-                w['fleet_var'].set(enabled)
-            self._update_send_button_states()
-
-        fleet_cb = tk.Checkbutton(
-            fleet_frame,
-            variable=fleet_var,
-            command=lambda: on_fleet_toggle(),
-            bg=BG_PANEL,
-            activebackground=BG_PANEL,
-            selectcolor=WHITE,
-            highlightthickness=0
-        )
-        fleet_cb.pack(side="left", padx=(0, 2))
-
-        tk.Label(
-            fleet_frame,
-            text="⚓ Fleet",
-            fg=DIM,
-            bg=BG_PANEL,
-            font=("Consolas", 8, "bold")
-        ).pack(side="left", padx=(0, 6))
-
-        btn_state = "normal" if self.fleet_mode else "disabled"
         has_webhook = self._is_valid_webhook_url()
-        send_state = "normal" if (self.fleet_mode and has_webhook) else "disabled"
-        fg_copy_init = GOLD if self.fleet_mode else DIM
-        fg_send_init = CYAN if (self.fleet_mode and has_webhook) else DIM
+        fg_send_init = CYAN if has_webhook else DIM
+        send_state = "normal" if has_webhook else "disabled"
 
         copy_btn = tk.Button(
             fleet_frame,
-            text="⎘ COPY",
+            text="⎘ Copy to Clipboard",
             command=lambda: self.copy_session_report(char_id),
             bg=BG,
-            fg=fg_copy_init,
+            fg=GOLD,
             font=("Consolas", 8, "bold"),
             relief="flat",
             cursor="hand2",
-            width=8,
-            state=btn_state,
+            width=18,
+            state="normal",
             disabledforeground=DIM
         )
         copy_btn.pack(side="left", padx=(0, 4))
 
         send_btn = tk.Button(
             fleet_frame,
-            text="▲ SEND",
+            text="▲ Send to Discord",
             command=lambda: self.show_send_report_dialog(char_id),
             bg=BG,
             fg=fg_send_init,
             font=("Consolas", 8, "bold"),
             relief="flat",
             cursor="hand2",
-            width=8,
+            width=18,
             state=send_state,
             disabledforeground=DIM
         )
         send_btn.pack(side="left")
 
-        # Mining rate stats
+        # mining rates
         rate_frame = tk.Frame(col_inner, bg=BG_PANEL)
         rate_frame.pack(fill="x", pady=(5, 0))
         rate_frame.bind("<Button-3>", show_context_menu)
@@ -951,7 +1148,7 @@ class MiningDashboard:
         actual_label.pack(anchor="w", pady=1)
         actual_label.bind("<Button-3>", show_context_menu)
 
-        # Section separator
+        # separator
         separator = tk.Label(
             col_inner,
             text="── SESSION BREAKDOWN ──",
@@ -962,7 +1159,7 @@ class MiningDashboard:
         separator.pack(pady=(5, 3))
         separator.bind("<Button-3>", show_context_menu)
 
-        # Summary box
+        # summary box
         summary_outer = tk.Frame(col_inner, bg=BORDER, padx=1, pady=1)
         summary_outer.pack(fill="both", pady=(0, 3))
         summary_outer.bind("<Button-3>", show_context_menu)
@@ -990,16 +1187,13 @@ class MiningDashboard:
             'ship_indicator': ship_indicator,
             'profile_label': profile_label,
             'fleet_frame': fleet_frame,
-            'fleet_var': fleet_var,
             'copy_btn': copy_btn,
             'send_btn': send_btn
         }
 
         return col_outer, widgets
 
-    # ---------------- #
-    #  HISTORY WINDOW  #
-    # ---------------- #
+    # history window
 
     def show_history(self) -> None:
         if self.history_window is None or not self.history_window.winfo_exists():
@@ -1259,13 +1453,10 @@ class MiningDashboard:
         text_widget.insert("1.0", result)
         text_widget.config(state="disabled")
 
-    # ========================= #
-    #     EXCEL EXPORT         #
-    # ========================= #
+    # excel export
 
     def _gather_history_data(self, days: int):
-        # Collect mining data from logs for the given number of days
-        # Returns: (per_char_ores, per_char_m3, combined_m3, days_used)
+        # collect mining data from logs for given days
         try:
             days = int(days)
             if days < 1:
@@ -1308,9 +1499,7 @@ class MiningDashboard:
         return per_char_ores, per_char_m3, combined_m3, days
 
     def _gather_daily_history_data(self, days: int):
-        # Collect mining data with daily breakdown
-        # Returns: (per_char_daily_ores, all_ore_names, all_dates, days_used)
-        # per_char_daily_ores[char_id][date_str][ore_name] = m3
+        # collect mining data with daily breakdown
         try:
             days = int(days)
             if days < 1:
@@ -1367,7 +1556,7 @@ class MiningDashboard:
         return per_char_daily, sorted_ores, sorted_dates, days
 
     def _get_export_path(self, suffix: str, days: int) -> str:
-        # Generate export filepath with auto-naming
+        # generate export filepath
         export_dir = self.app_config.get("app_settings", {}).get("export_dir", "")
         if not export_dir or not os.path.isdir(export_dir):
             export_dir = os.path.dirname(os.path.abspath(CONFIG_FILE))
@@ -1377,7 +1566,7 @@ class MiningDashboard:
         return os.path.join(export_dir, filename)
 
     def show_export_menu(self, button_widget):
-        # Show export type selection popup
+        # export type selection popup
         if not HAS_OPENPYXL:
             messagebox.showwarning("Missing Library",
                 "openpyxl is required for Excel export.\n\npip install openpyxl")
@@ -1405,7 +1594,7 @@ class MiningDashboard:
             menu.grab_release()
 
     def _do_export(self, export_type: str):
-        # Execute the selected export type
+        # run selected export
         try:
             days = int(self.history_days_var.get())
         except (ValueError, AttributeError):
@@ -1433,7 +1622,7 @@ class MiningDashboard:
                 parent=self.history_window or self.root)
 
     def _apply_eve_header(self, ws, row, col, text, width=None, is_title=False):
-        # Apply EVE Online styled header cell
+        # styled header cell
         cell = ws.cell(row=row, column=col, value=text)
         if is_title:
             cell.font = Font(name="Consolas", size=12, bold=True, color="3DD8E0")
@@ -1453,7 +1642,7 @@ class MiningDashboard:
         return cell
 
     def _apply_eve_data_cell(self, ws, row, col, value, fmt="number", ore_name=None, is_total=False):
-        # Apply EVE Online styled data cell
+        # styled data cell
         cell = ws.cell(row=row, column=col, value=value)
         
         if is_total:
@@ -1485,7 +1674,7 @@ class MiningDashboard:
         return cell
 
     def _apply_eve_ore_label(self, ws, row, col, ore_name):
-        # Apply ore name with category color
+        # ore name with category color
         cell = ws.cell(row=row, column=col, value=ore_name)
         ore_color = _get_ore_excel_color(ore_name)
         cell.font = Font(name="Consolas", size=10, bold=True, color=ore_color)
@@ -1499,17 +1688,17 @@ class MiningDashboard:
         return cell
 
     def _style_eve_sheet(self, ws):
-        # Apply dark background to entire visible area
+        # dark background style
         ws.sheet_properties.tabColor = "3DD8E0"
 
     def _export_summary(self, days: int) -> str:
-        # Export: Summary - one sheet per character + combined
+        # summary export: per-character + combined
         per_char_ores, per_char_m3, combined_m3, days = self._gather_history_data(days)
         filepath = self._get_export_path("summary", days)
 
         wb = Workbook()
         
-        # -- COMBINED SHEET --
+        # combined sheet
         ws = wb.active
         ws.title = "Combined"
         self._style_eve_sheet(ws)
@@ -1555,13 +1744,13 @@ class MiningDashboard:
         total_pct = self._apply_eve_data_cell(ws, row, 3, 100.0, is_total=True)
         total_pct.number_format = '0.0"%"'
         
-        # -- PER-CHARACTER SHEETS --
+        # per-character sheets
         for char_id, tracker in self.all_characters.items():
             ores = per_char_ores.get(char_id, {})
             if not ores:
                 continue
             
-            # Clean sheet name (max 31 chars, no special chars)
+            # clean sheet name
             sheet_name = tracker.char_name[:28].replace("/", "-").replace("\\", "-")
             ws = wb.create_sheet(title=sheet_name)
             self._style_eve_sheet(ws)
@@ -1597,7 +1786,7 @@ class MiningDashboard:
         return filepath
 
     def _export_daily_breakdown(self, days: int) -> str:
-        # Export: Daily breakdown - days as rows, ores as columns, per character
+        # daily breakdown export
         per_char_daily, sorted_ores, sorted_dates, days = self._gather_daily_history_data(days)
         filepath = self._get_export_path("daily", days)
 
@@ -1616,7 +1805,7 @@ class MiningDashboard:
             accent_idx = list(self.all_characters.keys()).index(char_id)
             accent_color = CHAR_ACCENTS[accent_idx % len(CHAR_ACCENTS)].lstrip("#")
             
-            # Get ores that this character actually mined
+            # ores this character mined
             char_ores = set()
             for date_ores in daily_data.values():
                 char_ores.update(date_ores.keys())
@@ -1632,7 +1821,7 @@ class MiningDashboard:
                           end_row=1, end_column=min(len(char_ores_sorted) + 2, 10))
             title_cell.font = Font(name="Consolas", size=12, bold=True, color=accent_color)
             
-            # Headers: Date | Ore1 | Ore2 | ... | TOTAL
+            # headers
             self._apply_eve_header(ws, 3, 1, "Date", width=14)
             for j, ore_name in enumerate(char_ores_sorted):
                 header_cell = self._apply_eve_header(ws, 3, j + 2, ore_name, width=16)
@@ -1679,7 +1868,7 @@ class MiningDashboard:
                 self._apply_eve_data_cell(ws, row, j + 2, ore_totals[ore_name], is_total=True)
             self._apply_eve_data_cell(ws, row, total_col, grand_total, is_total=True)
         
-        # If no sheets were created, add a placeholder
+        # placeholder if no data
         if len(wb.sheetnames) == 0:
             ws = wb.create_sheet(title="No Data")
             ws.cell(row=1, column=1, value="No mining data found in this period.")
@@ -1688,7 +1877,7 @@ class MiningDashboard:
         return filepath
 
     def _export_ore_pivot(self, days: int) -> str:
-        # Export: Ore pivot - ores as rows, characters as columns
+        # ore pivot export
         per_char_ores, per_char_m3, combined_m3, days = self._gather_history_data(days)
         filepath = self._get_export_path("pivot", days)
 
@@ -1697,13 +1886,13 @@ class MiningDashboard:
         ws.title = "Ore Pivot"
         self._style_eve_sheet(ws)
 
-        # Collect all ore names across all characters
+        # collect all ore names
         all_ores = set()
         for ores in per_char_ores.values():
             all_ores.update(ores.keys())
         sorted_ores = sorted(all_ores)
 
-        # Active characters (those with data)
+        # characters with data
         active_chars = [(cid, t) for cid, t in self.all_characters.items() 
                         if cid in per_char_ores and per_char_ores[cid]]
 
@@ -1718,7 +1907,7 @@ class MiningDashboard:
         ws.merge_cells(start_row=1, start_column=1, 
                       end_row=1, end_column=len(active_chars) + 2)
 
-        # Headers: Ore Type | Char1 | Char2 | ... | TOTAL
+        # headers
         self._apply_eve_header(ws, 3, 1, "Ore Type", width=28)
         for j, (char_id, tracker) in enumerate(active_chars):
             accent_idx = list(self.all_characters.keys()).index(char_id)
@@ -1754,7 +1943,7 @@ class MiningDashboard:
             grand_total += ore_row_total
             row += 1
 
-        # Character totals row
+        # totals row
         row += 1
         self._apply_eve_data_cell(ws, row, 1, "TOTAL", is_total=True)
         for j, (char_id, tracker) in enumerate(active_chars):
@@ -1765,16 +1954,14 @@ class MiningDashboard:
         return filepath
 
     def _export_full(self, days: int) -> str:
-        # Export: Full - all sheets in one workbook
+        # full export: all sheets in one workbook
         per_char_ores, per_char_m3, combined_m3, days_used = self._gather_history_data(days)
         per_char_daily, sorted_ores_daily, sorted_dates, _ = self._gather_daily_history_data(days)
         filepath = self._get_export_path("full", days_used)
 
         wb = Workbook()
         
-        # ============================
-        # SHEET 1: SUMMARY (Combined)
-        # ============================
+        # sheet 1: summary
         ws = wb.active
         ws.title = "Summary"
         self._style_eve_sheet(ws)
@@ -1817,7 +2004,7 @@ class MiningDashboard:
         total_pct = self._apply_eve_data_cell(ws, row, 3, 100.0, is_total=True)
         total_pct.number_format = '0.0"%"'
         
-        # Per-character ore breakdown below summary
+        # per-character ore breakdown
         row += 3
         for char_id, tracker in self.all_characters.items():
             ores = per_char_ores.get(char_id, {})
@@ -1839,9 +2026,7 @@ class MiningDashboard:
                 row += 1
             row += 1
 
-        # ============================
-        # SHEET 2: ORE PIVOT
-        # ============================
+        # sheet 2: ore pivot
         ws2 = wb.create_sheet(title="Ore Pivot")
         self._style_eve_sheet(ws2)
         
@@ -1892,9 +2077,7 @@ class MiningDashboard:
                 self._apply_eve_data_cell(ws2, row2, j + 2, per_char_m3.get(char_id, 0.0), is_total=True)
             self._apply_eve_data_cell(ws2, row2, total_col, combined_m3, is_total=True)
 
-        # ============================
-        # SHEET 3+: DAILY PER CHAR
-        # ============================
+        # sheet 3+: daily per character
         for char_id, tracker in self.all_characters.items():
             daily_data = per_char_daily.get(char_id, {})
             if not daily_data:
@@ -1966,9 +2149,7 @@ class MiningDashboard:
         wb.save(filepath)
         return filepath
 
-    # ------------------- #
-    #  ORE VOLUME LOOKUP  #
-    # ------------------- #
+    # ore volume lookup
 
     @lru_cache(maxsize=256)
     def get_ore_volume(self, raw_name: str) -> Tuple[float, str]:
@@ -2000,9 +2181,7 @@ class MiningDashboard:
         if "crit_keyword" in app_settings:
             CRITICAL_HIT_KEYWORD = app_settings["crit_keyword"]
 
-    # -------- #
-    #  CONFIG  #
-    # -------- #
+    # config
 
     def load_config(self) -> Dict:
         if os.path.exists(CONFIG_FILE):
@@ -2028,9 +2207,7 @@ class MiningDashboard:
         self.save_config()
         self.root.destroy()
 
-    # ---------------------- #
-    #  LIVE MONITORING LOOP  #
-    # ---------------------- #
+    # live monitoring loop
 
     def update_loop(self) -> None:
         if not self.update_loop_running:
@@ -2049,10 +2226,12 @@ class MiningDashboard:
                         new_data = f.read()
                         new_pos = f.tell()
                         if new_data:
+                            was_active = tracker.session_active
                             self._process_log_data(tracker, new_data)
-                        # Only advance log_pos when session is active
-                        # so events during inactive period are preserved
-                        if tracker.session_active:
+                            # advance log_pos if session was active (even if auto-paused during processing)
+                            if was_active:
+                                tracker.log_pos = new_pos
+                        elif tracker.session_active:
                             tracker.log_pos = new_pos
                 except Exception:
                     pass
@@ -2061,14 +2240,29 @@ class MiningDashboard:
         self.root.after(UPDATE_INTERVAL_MS, self.update_loop)
 
     def _process_log_data(self, tracker: CharacterTracker, data: str) -> None:
-        # log processing with compression tracking
+        # parse mining and compression events
         if not tracker.session_active:
             return
 
         crit_processed = False
         
         for line in data.splitlines():
-            # Check for compression events
+            # auto-pause: check for notify events that should pause session
+            if "(notify)" in line.lower():
+                should_pause = False
+                for keyword in AUTO_PAUSE_KEYWORDS:
+                    if keyword.lower() in line.lower():
+                        should_pause = True
+                        break
+                if should_pause:
+                    tracker.session_active = False
+                    # update UI button
+                    if tracker.char_id in self.char_widgets:
+                        w = self.char_widgets[tracker.char_id]
+                        w['start_stop_btn'].config(text="▶ START", fg=GREEN)
+                    return
+
+            # compression event
             compression_match = COMPRESSION_PATTERN.search(line)
             if compression_match:
                 ore_type = compression_match.group('ore_type')
@@ -2083,11 +2277,11 @@ class MiningDashboard:
                 tracker.compression_log[ore_name] = tracker.compression_log.get(ore_name, 0) + total_volume
                 continue
             
-            # OPTIMIZATION: Fast check - skip if not a mining line
+            # skip non-mining lines
             if not MINING_LINE.match(line):
                 continue
             
-            # Regular mining
+            # regular mining
             regular_match = REGULAR_MINE_PATTERN.search(line)
             if regular_match:
                 units = float(regular_match.group('amount').replace(",", ""))
@@ -2096,7 +2290,7 @@ class MiningDashboard:
                 tracker.total_m3 += total_volume
                 tracker.ore_summary[ore_name] = tracker.ore_summary.get(ore_name, 0) + total_volume
 
-            # Critical hit
+            # critical hit
             if CRITICAL_HIT_KEYWORD in line and not crit_processed:
                 crit_match = CRIT_MINE_PATTERN.search(line)
                 if crit_match:
@@ -2131,9 +2325,7 @@ class MiningDashboard:
     
             self._update_rate_stats(char_id, tracker, w)
 
-    # -------- #
-    #  ALERTS  #
-    # -------- #
+    # alerts
 
     def trigger_crit_alert(self) -> None:
         if HAS_NOTIFICATION:
@@ -2148,9 +2340,7 @@ class MiningDashboard:
             except Exception:
                 pass
 
-    # ===================== #
-    #   SESSION CONTROL    #
-    # ===================== #
+    # session control
 
     def toggle_session(self, char_id: str):
         tracker = self.all_characters[char_id]
@@ -2159,8 +2349,7 @@ class MiningDashboard:
         tracker.session_active = not tracker.session_active
 
         if tracker.session_active:
-            # Process any backlog data accumulated while session was stopped
-            # so crits/ore from the inactive period are not lost
+            # process backlog from inactive period
             if tracker.log_path and os.path.exists(tracker.log_path):
                 try:
                     with open(tracker.log_path, "r", encoding="utf-8-sig", errors="ignore") as f:
@@ -2171,8 +2360,7 @@ class MiningDashboard:
                         tracker.log_pos = f.tell()
                 except Exception:
                     pass
-            # Set session baselines AFTER backlog processing
-            # so rate calculation starts clean from this point
+            # set session baselines after backlog
             tracker.session_start_time = time.time()
             tracker.session_start_m3 = tracker.total_m3
             widgets['start_stop_btn'].config(text="■ STOP", fg=RED)
@@ -2204,12 +2392,10 @@ class MiningDashboard:
         widgets['summary'].config(text="Waiting...")
         widgets['actual'].config(text="◉ Actual: -- m3/s")
 
-    # ===================== #
-    #     SHIP CONFIG      #
-    # ===================== #
+    # ship config
 
     def load_ship_configs(self):
-        # Load ship configurations per character
+        # load ship configs from saved data
         ship_configs = self.app_config.get("ship_configs", {})
         
         for char_id, tracker in self.all_characters.items():
@@ -2227,17 +2413,17 @@ class MiningDashboard:
                             modules.append(MiningModule.from_dict(mod_data))
                         tracker.ship_profiles[profile_name] = modules
                         
-                        # Load drone config for this profile
+                        # load drone config
                         drone_data = profile_data.get("drones", {})
                         if drone_data:
                             tracker.drone_profiles[profile_name] = MiningDrone.from_dict(drone_data)
                         else:
                             tracker.drone_profiles[profile_name] = MiningDrone()
                         
-                        # Load implant config for this profile
+                        # load implant config
                         tracker.implant_profiles[profile_name] = profile_data.get("highwall_implant", False)
                         
-                        # Load crit config for this profile
+                        # load crit config
                         tracker.crit_profiles[profile_name] = {
                             "chance": profile_data.get("crit_chance", 0.0),
                             "bonus": profile_data.get("crit_bonus", 0.0)
@@ -2245,7 +2431,7 @@ class MiningDashboard:
                     
                     tracker.active_profile = cfg.get("active_profile", "Default")
                     
-                    # Ensure active profile exists
+                    # ensure active profile exists
                     if tracker.active_profile not in tracker.ship_profiles:
                         if tracker.ship_profiles:
                             tracker.active_profile = list(tracker.ship_profiles.keys())[0]
@@ -2285,7 +2471,7 @@ class MiningDashboard:
                         tracker.active_profile = "Default"
 
     def save_ship_configs(self):
-        # Save ship configurations with multiple profiles
+        # save all ship profiles to config
         ship_configs = {}
         for char_id, tracker in self.all_characters.items():
             profiles_data = {}
@@ -2310,7 +2496,7 @@ class MiningDashboard:
         self.save_config()
 
     def show_ship_config(self, char_id: str):
-        # Show ship configuration dialog
+        # ship config dialog
         if char_id in self.ship_config_dialogs and self.ship_config_dialogs[char_id].winfo_exists():
             self.ship_config_dialogs[char_id].lift()
             self.ship_config_dialogs[char_id].focus_force()
@@ -2395,9 +2581,7 @@ class MiningDashboard:
         close_btn.bind("<Enter>", lambda e: close_btn.config(fg=RED))
         close_btn.bind("<Leave>", lambda e: close_btn.config(fg=DIM))
 
-        # ========================= #
-        #    PROFILE MANAGEMENT    #
-        # ========================= #
+        # profile management
         
         profile_frame = tk.Frame(main_frame, bg=BG_PANEL)
         profile_frame.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(0, 15))
@@ -2410,7 +2594,7 @@ class MiningDashboard:
             font=("Consolas", 9, "bold")
         ).pack(side="left", padx=(0, 10))
 
-        # Profile selector
+        # profile selector
         current_profile = tk.StringVar(value=tracker.active_profile)
         profile_menu = tk.OptionMenu(
             profile_frame,
@@ -2434,7 +2618,7 @@ class MiningDashboard:
         )
         profile_menu.pack(side="left", padx=5)
 
-        # Profile management buttons
+        # profile buttons
         btn_new = tk.Button(
             profile_frame,
             text="+ NEW",
@@ -2474,7 +2658,7 @@ class MiningDashboard:
         )
         btn_delete.pack(side="left", padx=2)
 
-        # MINING MODULES
+        # mining modules
         modules_label = tk.Label(
             main_frame,
             text="◆ MINING MODULES",
@@ -2492,10 +2676,10 @@ class MiningDashboard:
         module_vars = []
 
         def load_profile_into_ui(profile_name: str):
-            """Load selected profile's modules into UI"""
+            # load selected profile's modules into UI
             modules = tracker.ship_profiles.get(profile_name, [])
             
-            # Pad to MAX_MODULES
+            # pad to MAX_MODULES
             while len(modules) < MAX_MODULES:
                 modules.append(MiningModule())
             
@@ -2527,7 +2711,7 @@ class MiningDashboard:
             
             update_preview()
 
-        # Create module input fields
+        # module input fields
         active_modules = tracker.get_active_modules()
         while len(active_modules) < MAX_MODULES:
             active_modules.append(MiningModule())
@@ -2611,9 +2795,7 @@ class MiningDashboard:
 
         sep_row = 4 + MAX_MODULES
 
-        # ========================= #
-        #      MINING DRONES       #
-        # ========================= #
+        # mining drones
 
         drones_label = tk.Label(
             main_frame,
@@ -2626,7 +2808,7 @@ class MiningDashboard:
 
         drone_row = sep_row + 1
 
-        # Drone count
+        # drone count
         tk.Label(main_frame, text="Count:", fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).grid(row=drone_row, column=0, columnspan=2, sticky="e", padx=(0, 5), pady=3)
 
         active_drone = tracker.get_active_drones()
@@ -2644,7 +2826,7 @@ class MiningDashboard:
 
         tk.Label(main_frame, text="(max 5)", fg=GOLD, bg=BG_PANEL, font=("Consolas", 8)).grid(row=drone_row, column=3, sticky="w", padx=5, pady=3)
 
-        # Drone yield per cycle
+        # drone yield
         drone_row2 = drone_row + 1
         tk.Label(main_frame, text="Yield (m3/cycle):", fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).grid(row=drone_row2, column=0, columnspan=2, sticky="e", padx=(0, 5), pady=3)
 
@@ -2662,7 +2844,7 @@ class MiningDashboard:
 
         tk.Label(main_frame, text="per drone", fg=GOLD, bg=BG_PANEL, font=("Consolas", 8)).grid(row=drone_row2, column=3, sticky="w", padx=5, pady=3)
 
-        # Drone cycle time
+        # drone cycle time
         drone_row3 = drone_row + 2
         tk.Label(main_frame, text="Cycle Time (s):", fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).grid(row=drone_row3, column=0, columnspan=2, sticky="e", padx=(0, 5), pady=3)
 
@@ -2684,9 +2866,7 @@ class MiningDashboard:
             'cycle': drone_cycle_var
         }
 
-        # ========================= #
-        #      MINING IMPLANT      #
-        # ========================= #
+        # mining implant
 
         implant_row = drone_row + 3
 
@@ -2732,9 +2912,7 @@ class MiningDashboard:
 
         preview_row = implant_cb_row + 1
 
-        # ========================= #
-        #     CRITICAL HITS AVG    #
-        # ========================= #
+        # critical hits avg
 
         crit_section_row = preview_row
 
@@ -2749,7 +2927,7 @@ class MiningDashboard:
 
         active_crit = tracker.get_active_crit()
 
-        # Crit chance
+        # crit chance
         crit_row1 = crit_section_row + 1
         tk.Label(main_frame, text="Crit Chance:", fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).grid(row=crit_row1, column=0, columnspan=2, sticky="e", padx=(0, 5), pady=3)
 
@@ -2767,7 +2945,7 @@ class MiningDashboard:
 
         tk.Label(main_frame, text="% (e.g. 1.50)", fg=GOLD, bg=BG_PANEL, font=("Consolas", 8)).grid(row=crit_row1, column=3, sticky="w", padx=5, pady=3)
 
-        # Crit bonus yield
+        # crit bonus
         crit_row2 = crit_section_row + 2
         tk.Label(main_frame, text="Crit Bonus:", fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).grid(row=crit_row2, column=0, columnspan=2, sticky="e", padx=(0, 5), pady=3)
 
@@ -2792,7 +2970,7 @@ class MiningDashboard:
 
         preview_row = crit_row2 + 1
 
-        # Theoretical preview
+        # theoretical preview
         preview_frame = tk.Frame(main_frame, bg=BG, padx=10, pady=8)
         preview_frame.grid(row=preview_row, column=0, columnspan=4, sticky="ew", pady=(15, 10))
 
@@ -2819,12 +2997,12 @@ class MiningDashboard:
                     except ValueError:
                         pass
 
-            # Apply Highwall MX-1005 implant bonus (+5%) to modules only
+            # apply Highwall implant bonus (+5%) to modules
             has_implant = implant_var.get()
             if has_implant and module_m3_per_sec > 0:
                 module_m3_per_sec *= 1.05
 
-            # Apply critical hit average yield to modules only
+            # apply crit avg yield to modules
             has_crit = False
             try:
                 cc = float(crit_vars['chance'].get()) if crit_vars['chance'].get() else 0.0
@@ -2837,7 +3015,7 @@ class MiningDashboard:
 
             total_m3_per_sec = module_m3_per_sec
 
-            # Add drone contribution (not affected by implant)
+            # add drone contribution
             drone_count = 0
             try:
                 dc = int(drone_vars['count'].get()) if drone_vars['count'].get() else 0
@@ -2879,21 +3057,21 @@ class MiningDashboard:
         crit_vars['chance'].trace_add('write', update_preview)
         crit_vars['bonus'].trace_add('write', update_preview)
 
-        # Profile change handler
+        # profile change handler
         def on_profile_change(*args):
             new_profile = current_profile.get()
             if new_profile != tracker.active_profile:
-                # Save current profile before switching
+                # save before switching
                 save_current_profile_to_tracker()
-                # Switch profile
+                # switch
                 tracker.active_profile = new_profile
-                # Load new profile into UI
+                # load into UI
                 load_profile_into_ui(new_profile)
 
         current_profile.trace_add('write', on_profile_change)
 
         def save_current_profile_to_tracker():
-            # Save current UI kept track of the profile used
+            # save UI state to tracker
             modules = []
             for mv in module_vars:
                 mod = MiningModule(
@@ -2905,7 +3083,7 @@ class MiningDashboard:
                 modules.append(mod)
             tracker.ship_profiles[tracker.active_profile] = modules
             
-            # Save drone config
+            # save drones
             try:
                 dc = int(drone_vars['count'].get()) if drone_vars['count'].get() else 0
                 dy = float(drone_vars['yield'].get()) if drone_vars['yield'].get() else 0.0
@@ -2915,10 +3093,10 @@ class MiningDashboard:
                 dc, dy, dcy = 0, 0.0, 0.0
             tracker.drone_profiles[tracker.active_profile] = MiningDrone(dc, dy, dcy)
             
-            # Save implant state
+            # save implant
             tracker.implant_profiles[tracker.active_profile] = implant_var.get()
             
-            # Save crit config
+            # save crit
             try:
                 cc = float(crit_vars['chance'].get()) if crit_vars['chance'].get() else 0.0
                 cb = float(crit_vars['bonus'].get()) if crit_vars['bonus'].get() else 0.0
@@ -2934,10 +3112,8 @@ class MiningDashboard:
 
         def save_and_close():
             try:
-                # Save current profile
                 save_current_profile_to_tracker()
-                
-                # Save all profiles to config
+                # save to config
                 self.save_ship_configs()
 
                 if char_id in self.char_widgets:
@@ -3008,7 +3184,7 @@ class MiningDashboard:
         dialog.after(150, initial_focus)
 
     def _ask_string_centered(self, title, prompt, parent_dialog, initialvalue=""):
-        # Custom askstring dialog that centers on the ship config window
+        # centered string input dialog
         result = [None]
         dlg = tk.Toplevel(parent_dialog)
         dlg.title(title)
@@ -3045,7 +3221,7 @@ class MiningDashboard:
 
         dlg.update_idletasks()
 
-        # Center on parent dialog
+        # center on parent
         pw = parent_dialog.winfo_width()
         ph = parent_dialog.winfo_height()
         px = parent_dialog.winfo_x()
@@ -3061,9 +3237,8 @@ class MiningDashboard:
         dlg.wait_window()
         return result[0] if result[0] else None
 
-    def create_new_profile(self, tracker: CharacterTracker, current_profile_var: tk.StringVar, 
+    def create_new_profile(self, tracker: CharacterTracker, current_profile_var: tk.StringVar,
                           profile_menu: tk.OptionMenu, module_vars: List, update_preview_fn, parent_dialog=None, drone_vars=None, implant_var=None, crit_vars=None):
-        # Create a new ship profile
         parent = parent_dialog or self.root
         new_name = self._ask_string_centered(
             "New Profile",
@@ -3073,7 +3248,7 @@ class MiningDashboard:
         
         if new_name:
             if tracker.create_profile(new_name):
-                # Update dropdown menu
+                # update dropdown
                 menu = profile_menu["menu"]
                 menu.delete(0, "end")
                 for profile in tracker.get_profile_names():
@@ -3081,30 +3256,27 @@ class MiningDashboard:
                         label=profile,
                         command=lambda value=profile: current_profile_var.set(value)
                     )
-                
-                # Switch to new profile
+
+                # switch to new profile
                 current_profile_var.set(new_name)
                 tracker.active_profile = new_name
-                
-                # Clear UI
+
+                # clear UI
                 for mv in module_vars:
                     mv['enabled'].set(False)
                     mv['name'].set("")
                     mv['yield'].set("")
                     mv['cycle'].set("")
                     mv['name_entry'].config(state="disabled")
-                
-                # Clear drone vars
+
                 if drone_vars:
                     drone_vars['count'].set("")
                     drone_vars['yield'].set("")
                     drone_vars['cycle'].set("")
-                
-                # Clear implant checkbox
+
                 if implant_var:
                     implant_var.set(False)
-                
-                # Clear crit vars
+
                 if crit_vars:
                     crit_vars['chance'].set("")
                     crit_vars['bonus'].set("")
@@ -3113,9 +3285,8 @@ class MiningDashboard:
             else:
                 messagebox.showerror("Error", "Profile name already exists or is invalid")
 
-    def rename_current_profile(self, tracker: CharacterTracker, current_profile_var: tk.StringVar, 
+    def rename_current_profile(self, tracker: CharacterTracker, current_profile_var: tk.StringVar,
                                profile_menu: tk.OptionMenu, parent_dialog=None):
-        # Rename the current profile
         old_name = tracker.active_profile
         
         if len(tracker.ship_profiles) == 1:
@@ -3133,7 +3304,7 @@ class MiningDashboard:
         
         if new_name and new_name != old_name:
             if tracker.rename_profile(old_name, new_name):
-                # Update dropdown menu
+                # update dropdown
                 menu = profile_menu["menu"]
                 menu.delete(0, "end")
                 for profile in tracker.get_profile_names():
@@ -3147,9 +3318,8 @@ class MiningDashboard:
                 messagebox.showerror("Error", "Profile name already exists or is invalid",
                                     parent=parent)
 
-    def delete_current_profile(self, tracker: CharacterTracker, current_profile_var: tk.StringVar, 
+    def delete_current_profile(self, tracker: CharacterTracker, current_profile_var: tk.StringVar,
                                profile_menu: tk.OptionMenu, module_vars: List, update_preview_fn, parent_dialog=None, drone_vars=None, implant_var=None, crit_vars=None):
-        # Delete the current profile
         profile_to_delete = tracker.active_profile
         parent = parent_dialog or self.root
         
@@ -3166,7 +3336,7 @@ class MiningDashboard:
         
         if result:
             if tracker.delete_profile(profile_to_delete):
-                # Update dropdown menu
+                # update dropdown
                 menu = profile_menu["menu"]
                 menu.delete(0, "end")
                 for profile in tracker.get_profile_names():
@@ -3175,10 +3345,10 @@ class MiningDashboard:
                         command=lambda value=profile: current_profile_var.set(value)
                     )
                 
-                # Switch to remaining profile
+                # switch to remaining
                 current_profile_var.set(tracker.active_profile)
                 
-                # Load new profile into UI
+                # load new profile into UI
                 modules = tracker.get_active_modules()
                 while len(modules) < MAX_MODULES:
                     modules.append(MiningModule())
@@ -3194,24 +3364,92 @@ class MiningDashboard:
                     else:
                         mv['name_entry'].config(state="normal")
                 
-                # Load drone config for new active profile
+                # load drone config
                 if drone_vars:
                     drone = tracker.get_active_drones()
                     drone_vars['count'].set(str(drone.count) if drone.count > 0 else "")
                     drone_vars['yield'].set(str(drone.yield_per_cycle) if drone.yield_per_cycle > 0 else "")
                     drone_vars['cycle'].set(str(drone.cycle_time) if drone.cycle_time > 0 else "")
                 
-                # Load implant state for new active profile
+                # load implant state
                 if implant_var:
                     implant_var.set(tracker.get_active_implant())
                 
-                # Load crit config for new active profile
+                # load crit config
                 if crit_vars:
                     crit = tracker.get_active_crit()
                     crit_vars['chance'].set(str(crit["chance"]) if crit["chance"] > 0 else "")
                     crit_vars['bonus'].set(str(crit["bonus"]) if crit["bonus"] > 0 else "")
                 
                 update_preview_fn()
+
+    def show_profile_picker(self, char_id: str, event):
+        # profile selection popup
+        tracker = self.all_characters.get(char_id)
+        if not tracker:
+            return
+
+        menu = tk.Menu(self.root, tearoff=0, bg=BG_PANEL, fg=WHITE,
+                       activebackground=BORDER, activeforeground=CYAN,
+                       relief="flat", bd=1, font=("Consolas", 9))
+
+        profiles = tracker.get_profile_names()
+        for profile_name in profiles:
+            # mark active profile
+            if profile_name == tracker.active_profile:
+                label = f"\u2714 {profile_name}"
+            else:
+                label = f"   {profile_name}"
+            menu.add_command(
+                label=label,
+                command=lambda pn=profile_name: self.switch_profile_from_main(char_id, pn)
+            )
+
+        menu.add_separator()
+        menu.add_command(
+            label="\u2795 Create New Profile\u2026",
+            command=lambda: self.create_profile_from_main(char_id)
+        )
+
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def switch_profile_from_main(self, char_id: str, profile_name: str):
+        # switch profile from main UI
+        tracker = self.all_characters.get(char_id)
+        if not tracker:
+            return
+        if profile_name == tracker.active_profile:
+            return
+
+        tracker.active_profile = profile_name
+        self.save_ship_configs()
+        self.update_profile_label(char_id)
+        self.update_ship_indicator(char_id)
+
+    def create_profile_from_main(self, char_id: str):
+        # create and switch to new profile
+        tracker = self.all_characters.get(char_id)
+        if not tracker:
+            return
+
+        new_name = self._ask_string_centered(
+            "New Profile",
+            "Enter name for new ship profile:",
+            self.root
+        )
+
+        if new_name:
+            if tracker.create_profile(new_name):
+                tracker.active_profile = new_name
+                self.save_ship_configs()
+                self.update_profile_label(char_id)
+                self.update_ship_indicator(char_id)
+            else:
+                messagebox.showerror("Error", "Profile name already exists or is invalid",
+                                     parent=self.root)
 
     def update_ship_indicator(self, char_id: str):
         tracker = self.all_characters[char_id]
@@ -3224,16 +3462,13 @@ class MiningDashboard:
             widgets['ship_indicator'].config(fg=RED)
 
     def update_profile_label(self, char_id: str):
-        # Update the active profile label for a character
         tracker = self.all_characters[char_id]
         if char_id not in self.char_widgets:
             return
         widgets = self.char_widgets[char_id]
-        widgets['profile_label'].config(text=f"〈{tracker.active_profile}〉")
+        widgets['profile_label'].config(text=f"\u3008{tracker.active_profile}\u3009")
 
-    # ========================= #
-    #    RATE CALCULATIONS     #
-    # ========================= #
+    # rate calculations
 
     def _update_rate_stats(self, char_id: str, tracker: CharacterTracker, widgets: Dict):
         theoretical_m3_per_sec = tracker.get_total_theoretical_m3_per_sec()
@@ -3257,9 +3492,7 @@ class MiningDashboard:
             text=f"◉ Actual: {actual_m3_per_sec:.2f} m3/s ({actual_m3_per_sec * 3600:,.0f} m3/hr)"
         )
 
-    # ========================= #
-    #      CONFIG DIALOG       #
-    # ========================= #
+    # config dialog
 
     def show_config_dialog(self):
         global DOCS, UPDATE_INTERVAL_MS, HISTORY_DAYS
@@ -3350,11 +3583,11 @@ class MiningDashboard:
         close_btn.bind("<Enter>", lambda e: close_btn.config(fg=RED))
         close_btn.bind("<Leave>", lambda e: close_btn.config(fg=DIM))
 
-        # Main content frame
+        # content
         content_frame = tk.Frame(main_frame, bg=BG_PANEL)
         content_frame.pack(fill="both", expand=True)
 
-        # CHARACTER SELECTION
+        # character selection
         tk.Label(
             content_frame,
             text="◆ CHARACTER SELECTION",
@@ -3400,7 +3633,7 @@ class MiningDashboard:
                 font=("Consolas", 10, "bold")
             ).pack(side="left")
 
-        # Separator
+        # separator
         tk.Label(
             content_frame,
             text="-" * 55,
@@ -3409,7 +3642,7 @@ class MiningDashboard:
             font=("Consolas", 8)
         ).pack(pady=8)
 
-        # APPLICATION SETTINGS
+        # app settings
         fields_frame = tk.Frame(content_frame, bg=BG_PANEL)
         fields_frame.pack(fill="x")
 
@@ -3454,7 +3687,7 @@ class MiningDashboard:
 
             return var
 
-        # Paths & Files
+        # paths & files
         tk.Label(
             fields_frame,
             text="◆ PATHS & FILES",
@@ -3466,7 +3699,7 @@ class MiningDashboard:
         docs_var = make_field(fields_frame, 1, "Gamelogs Path:",
                               app_settings.get("docs_path", DOCS), width=40)
 
-        # Separator
+        # separator
         tk.Label(
             fields_frame,
             text="-" * 55,
@@ -3475,7 +3708,7 @@ class MiningDashboard:
             font=("Consolas", 8)
         ).grid(row=2, column=0, columnspan=3, pady=8)
 
-        # Timing & Limits
+        # timing & limits
         tk.Label(
             fields_frame,
             text="◆ TIMING & LIMITS",
@@ -3492,7 +3725,7 @@ class MiningDashboard:
                                  app_settings.get("history_days", HISTORY_DAYS),
                                  width=10)
 
-        # Separator
+        # separator
         tk.Label(
             fields_frame,
             text="-" * 55,
@@ -3501,7 +3734,7 @@ class MiningDashboard:
             font=("Consolas", 8)
         ).grid(row=6, column=0, columnspan=3, pady=8)
 
-        # FLEET SETTINGS
+        # fleet settings
         tk.Label(
             fields_frame,
             text="◆ FLEET",
@@ -3515,6 +3748,105 @@ class MiningDashboard:
         webhook_var = make_field(fields_frame, 8, "Webhook URL:",
                                   fleet_cfg.get("webhook_url", ""),
                                   width=40)
+
+        # separator
+        tk.Label(
+            fields_frame,
+            text="-" * 55,
+            fg=BORDER,
+            bg=BG_PANEL,
+            font=("Consolas", 8)
+        ).grid(row=9, column=0, columnspan=3, pady=8)
+
+        # ore data update
+        tk.Label(
+            fields_frame,
+            text="◆ ORE DATABASE (SDE)",
+            fg=CYAN,
+            bg=BG_PANEL,
+            font=("Consolas", 9, "bold")
+        ).grid(row=10, column=0, columnspan=3, sticky="w", pady=(0, 8))
+
+        sde_info_text = f"SDE: {SDE_INFO['version']}  |  {SDE_INFO['ore_count']} ores  |  {SDE_INFO['updated_at']}"
+        sde_info_var = tk.StringVar(value=sde_info_text)
+        sde_info_label = tk.Label(
+            fields_frame,
+            textvariable=sde_info_var,
+            fg=DIM,
+            bg=BG_PANEL,
+            font=("Consolas", 8),
+            anchor="w"
+        )
+        sde_info_label.grid(row=11, column=0, columnspan=3, sticky="w", pady=(0, 6))
+
+        sde_status_var = tk.StringVar(value="")
+        sde_status_label = tk.Label(
+            fields_frame,
+            textvariable=sde_status_var,
+            fg=GOLD,
+            bg=BG_PANEL,
+            font=("Consolas", 8),
+            anchor="w"
+        )
+        sde_status_label.grid(row=12, column=0, columnspan=3, sticky="w")
+
+        def do_sde_update():
+            global ORE_VOLUMES, COMPRESSION_RATIOS, SDE_INFO
+            update_btn.config(state="disabled", text="↻ UPDATING...")
+
+            def run_update():
+                try:
+                    def progress(msg):
+                        try:
+                            dialog.after(0, lambda: sde_status_var.set(msg))
+                        except Exception:
+                            pass
+
+                    result = download_and_parse_sde(progress_callback=progress)
+                    _save_ore_data_cache(result)
+
+                    ORE_VOLUMES = {k: float(v) for k, v in result["ore_volumes"].items()}
+                    COMPRESSION_RATIOS = {k: int(v) for k, v in result["compression_ratios"].items()}
+                    SDE_INFO["version"] = result.get("sde_version", "updated")
+                    SDE_INFO["updated_at"] = result.get("updated_at", "now")
+                    SDE_INFO["ore_count"] = str(result.get("ore_count", len(ORE_VOLUMES)))
+
+                    def on_success():
+                        new_info = f"SDE: {SDE_INFO['version']}  |  {SDE_INFO['ore_count']} ores  |  {SDE_INFO['updated_at']}"
+                        sde_info_var.set(new_info)
+                        sde_status_var.set(f"✔ Updated! {SDE_INFO['ore_count']} ores loaded.")
+                        sde_status_label.config(fg=GREEN)
+                        update_btn.config(state="normal", text="↻ UPDATE ORE DATA")
+
+                    try:
+                        dialog.after(0, on_success)
+                    except Exception:
+                        pass
+
+                except Exception as e:
+                    def on_error():
+                        sde_status_var.set(f"✖ Error: {str(e)[:60]}")
+                        sde_status_label.config(fg=RED)
+                        update_btn.config(state="normal", text="↻ UPDATE ORE DATA")
+                    try:
+                        dialog.after(0, on_error)
+                    except Exception:
+                        pass
+
+            threading.Thread(target=run_update, daemon=True).start()
+
+        update_btn = tk.Button(
+            fields_frame,
+            text="↻ UPDATE ORE DATA",
+            command=do_sde_update,
+            bg=BG,
+            fg=CYAN,
+            font=("Consolas", 9, "bold"),
+            relief="flat",
+            cursor="hand2",
+            width=20
+        )
+        update_btn.grid(row=13, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         # Buttons
         btn_frame = tk.Frame(main_frame, bg=BG_PANEL)
@@ -3534,11 +3866,11 @@ class MiningDashboard:
                 messagebox.showerror("Invalid Input", "Please enter valid numbers for numeric fields.")
                 return
 
-            # Save character selection
+            # save chars
             selected_chars = [char_id for char_id, var in char_vars.items() if var.get()]
             self.save_visible_characters(selected_chars)
 
-            # Save application settings
+            # save app settings
             DOCS = docs_var.get().strip()
             UPDATE_INTERVAL_MS = new_interval
             HISTORY_DAYS = new_history
@@ -3551,7 +3883,7 @@ class MiningDashboard:
                 "max_modules": MAX_MODULES
             }
 
-            # Save fleet settings (webhook URL only, fleet mode is toggled per-character)
+            # save fleet settings
             self.fleet_webhook_url = webhook_var.get().strip()
             fleet_cfg = self.app_config.get("fleet", {})
             fleet_cfg["webhook_url"] = self.fleet_webhook_url
@@ -3617,33 +3949,27 @@ class MiningDashboard:
 
         dialog.after(150, initial_focus)
 
-    # ========================= #
-    #      FLEET REPORTING     #
-    # ========================= #
+    # fleet reporting
 
     def _is_valid_webhook_url(self) -> bool:
-        # Check if webhook URL looks like a valid Discord webhook
+        # validate Discord webhook URL
         url = self.fleet_webhook_url.strip()
         if not url:
             return False
         return url.startswith("https://discord.com/api/webhooks/") or url.startswith("https://discordapp.com/api/webhooks/")
 
     def _update_send_button_states(self):
-        # Enable/disable SEND buttons based on fleet mode + valid webhook
+        # toggle send buttons based on webhook availability
         has_webhook = self._is_valid_webhook_url()
         for cid, w in self.char_widgets.items():
-            if self.fleet_mode:
-                w['copy_btn'].config(state="normal", fg=GOLD)
-                if has_webhook:
-                    w['send_btn'].config(state="normal", fg=CYAN)
-                else:
-                    w['send_btn'].config(state="disabled", fg=DIM)
+            w['copy_btn'].config(state="normal", fg=GOLD)
+            if has_webhook:
+                w['send_btn'].config(state="normal", fg=CYAN)
             else:
-                w['copy_btn'].config(state="disabled", fg=DIM)
                 w['send_btn'].config(state="disabled", fg=DIM)
 
     def _build_session_report_text(self, tracker: CharacterTracker) -> str:
-        # Build a plain text mining report for clipboard
+        # plain text mining report
         session_duration = time.time() - tracker.session_start_time
         hours = int(session_duration // 3600)
         minutes = int((session_duration % 3600) // 60)
@@ -3654,7 +3980,7 @@ class MiningDashboard:
         lines.append(f"Session: {duration_str} | Crits: {tracker.crit_count}")
         lines.append("")
 
-        # Ore breakdown with units
+        # ore breakdown
         total_m3 = 0.0
         if tracker.ore_summary:
             for ore_name, volume in sorted(tracker.ore_summary.items(), key=lambda x: x[1], reverse=True):
@@ -3671,41 +3997,12 @@ class MiningDashboard:
         return "\n".join(lines)
 
     def _build_discord_payload(self, tracker: CharacterTracker) -> Dict:
-        # Build a Discord webhook payload with embed
-        session_m3 = tracker.total_m3 - tracker.session_start_m3
-        session_duration = time.time() - tracker.session_start_time
-        hours = int(session_duration // 3600)
-        minutes = int((session_duration % 3600) // 60)
-        duration_str = f"{hours}h {minutes:02d}m" if hours > 0 else f"{minutes}m"
-
-        # Build ore breakdown text with units
-        ore_lines = []
-        total_m3 = 0.0
-        if tracker.ore_summary:
-            for ore_name, volume in sorted(tracker.ore_summary.items(), key=lambda x: x[1], reverse=True):
-                vol_per_unit, _ = self.get_ore_volume(ore_name)
-                units = int(volume / vol_per_unit) if vol_per_unit > 0 else 0
-                ore_lines.append(f"{ore_name}: {volume:,.1f} m³ ({units:,} units)")
-                total_m3 += volume
-        ore_text = "\n".join(ore_lines) if ore_lines else "No ores mined."
-
-        embed = {
-            "title": f"⛏️ Mining Report — {tracker.char_name}",
-            "color": 0x3dd8e0,
-            "fields": [
-                {"name": "⏱️ Session", "value": duration_str, "inline": True},
-                {"name": "🎯 Crits", "value": str(tracker.crit_count), "inline": True},
-                {"name": "📦 Total", "value": f"{total_m3:,.1f} m³", "inline": True},
-                {"name": "💎 Ore Breakdown", "value": f"```\n{ore_text}\n```", "inline": False},
-            ],
-            "footer": {"text": "EVE Mining Dashboard"},
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-
-        return {"embeds": [embed]}
+        # Discord webhook plain text payload (same as clipboard copy)
+        report_text = self._build_session_report_text(tracker)
+        return {"content": report_text}
 
     def copy_session_report(self, char_id: str):
-        # Copy session report to clipboard
+        # copy report to clipboard
         tracker = self.all_characters.get(char_id)
         if not tracker:
             return
@@ -3720,17 +4017,17 @@ class MiningDashboard:
         self.root.clipboard_clear()
         self.root.clipboard_append(report_text)
 
-        # Brief visual feedback on the copy button
+        # visual feedback
         if char_id in self.char_widgets:
             btn = self.char_widgets[char_id].get('copy_btn')
             if btn:
                 original_text = btn.cget('text')
                 original_fg = btn.cget('fg')
-                btn.config(text="✓ COPIED", fg=GREEN)
+                btn.config(text="✓ Copied!", fg=GREEN)
                 btn.after(2000, lambda: btn.config(text=original_text, fg=original_fg))
 
     def show_send_report_dialog(self, char_id: str):
-        # Show confirmation dialog before sending to Discord
+        # send confirmation dialog
         tracker = self.all_characters.get(char_id)
         if not tracker:
             return
@@ -3743,14 +4040,14 @@ class MiningDashboard:
 
         if not self.fleet_webhook_url:
             messagebox.showwarning("No Webhook",
-                "Webhook URL not configured.\nSet it in ⚙ Config → Fleet Mode.",
+                "Webhook URL not configured.\nSet it in ⚙ Config → Fleet section.",
                 parent=self.root)
             return
 
-        # Build preview text
+        # preview text
         report_text = self._build_session_report_text(tracker)
 
-        # Create confirmation dialog
+        # confirmation dialog
         dlg = tk.Toplevel(self.root)
         dlg.configure(bg=BORDER)
         dlg.overrideredirect(True)
@@ -3808,7 +4105,7 @@ class MiningDashboard:
         preview_text.insert("1.0", report_text)
         preview_text.config(state="disabled")
 
-        # Webhook URL preview (truncated)
+        # webhook URL preview
         url_display = self.fleet_webhook_url
         if len(url_display) > 50:
             url_display = url_display[:25] + "..." + url_display[-22:]
@@ -3852,7 +4149,7 @@ class MiningDashboard:
             width=10
         ).pack(side="left", padx=5)
 
-        # Center on main window
+        # center on main window
         dlg.update_idletasks()
         pw = self.root.winfo_width()
         ph = self.root.winfo_height()
@@ -3865,7 +4162,7 @@ class MiningDashboard:
         dlg.geometry(f"+{x}+{y}")
 
     def _send_to_webhook(self, char_id: str):
-        # Send mining report to Discord webhook
+        # send report to Discord webhook
         tracker = self.all_characters.get(char_id)
         if not tracker or not self.fleet_webhook_url:
             return
@@ -3887,13 +4184,13 @@ class MiningDashboard:
             status = response.getcode()
 
             if status in (200, 204):
-                # Success feedback on send button
+                # success feedback
                 if char_id in self.char_widgets:
                     btn = self.char_widgets[char_id].get('send_btn')
                     if btn:
                         original_text = btn.cget('text')
                         original_fg = btn.cget('fg')
-                        btn.config(text="✓ SENT", fg=GREEN)
+                        btn.config(text="✓ Sent!", fg=GREEN)
                         btn.after(3000, lambda: btn.config(text=original_text, fg=original_fg))
             else:
                 messagebox.showerror("Send Failed",
