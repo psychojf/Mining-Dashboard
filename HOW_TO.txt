@@ -34,19 +34,16 @@ from the MAIN ui, right-click on a character's column and select **Ship Config**
 
 Fleet Mode lets you report mining session statistics directly to a Discord channel via webhook, making it easy to coordinate and share results during fleet mining operations.
 
-### Setup
+### Setup and sending reports
 
-1. Open **Settings** and paste your Discord webhook URL into the **Webhook URL** field.
-2. Fleet mode with copy/send button on character column to activate fleet reporting for that session.
+1. Open **Settings** and paste your Discord webhook URL into the **Webhook URL** field to use the "SEND to discord" button else it is gonna be disable
 
-### Sending Reports
-
-Once Fleet Mode is enabled, two buttons appear per character:
+the two buttons appear per character:
 
 | Button | Action |
 |---|---|
-| **⎘ COPY** | Copies a plain-text session report to your clipboard |
-| **▲ SEND** | Opens a confirmation dialog and posts a rich embed directly to Discord |
+| **⎘ COPY to clipboard** | Copies a plain-text session report to your clipboard |
+| **▲ SEND to discord** | Opens a confirmation dialog and posts a rich embed directly to Discord |
 
 The **SEND** button is only active when a valid Discord webhook URL is configured.
 
