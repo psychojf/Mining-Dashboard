@@ -37,7 +37,7 @@ Fleet Mode lets you report mining session statistics directly to a Discord chann
 ### Setup
 
 1. Open **Settings** and paste your Discord webhook URL into the **Webhook URL** field.
-2. Enable the **⚓ Fleet** toggle on any character column to activate fleet reporting for that session.
+2. Fleet mode with copy/send button on character column to activate fleet reporting for that session.
 
 ### Sending Reports
 
