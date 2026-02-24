@@ -620,7 +620,14 @@ class CharacterTracker:
         
         self.session_start_time: float = time.time()
         self.session_start_m3: float = 0.0
+        self.session_elapsed_offset: float = 0.0  # accumulated active seconds across pauses
         self.session_active: bool = False
+
+    def get_session_active_duration(self) -> float:
+        # total active mining time (excluding paused periods)
+        if self.session_active:
+            return self.session_elapsed_offset + (time.time() - self.session_start_time)
+        return self.session_elapsed_offset
 
     def get_active_modules(self) -> List[MiningModule]:
         # modules for active profile
@@ -2323,6 +2330,8 @@ class MiningDashboard:
                         should_pause = True
                         break
                 if should_pause:
+                    # save active time before pausing
+                    tracker.session_elapsed_offset += time.time() - tracker.session_start_time
                     tracker.session_active = False
                     # update UI button
                     if tracker.char_id in self.char_widgets:
@@ -2438,6 +2447,16 @@ class MiningDashboard:
         tracker.session_active = not tracker.session_active
 
         if tracker.session_active:
+            # determine if resuming existing session or starting fresh
+            is_resume = bool(tracker.ore_summary)
+
+            # set clock BEFORE backlog processing so auto-pause offset calc is correct
+            tracker.session_start_time = time.time()
+            if not is_resume:
+                # fresh start: reset baselines
+                tracker.session_start_m3 = tracker.total_m3
+                tracker.session_elapsed_offset = 0.0
+
             # process backlog from inactive period
             if tracker.log_path and os.path.exists(tracker.log_path):
                 try:
@@ -2455,9 +2474,6 @@ class MiningDashboard:
                 widgets['start_stop_btn'].config(text="▶ START", fg=GREEN)
                 return
 
-            # set session baselines after backlog
-            tracker.session_start_time = time.time()
-            tracker.session_start_m3 = tracker.total_m3
             widgets['start_stop_btn'].config(text="■ STOP", fg=RED)
             theoretical_m3_per_sec = tracker.get_total_theoretical_m3_per_sec()
             if theoretical_m3_per_sec > 0:
@@ -2465,6 +2481,8 @@ class MiningDashboard:
                     text=f"◉ Actual: {theoretical_m3_per_sec:.2f} m3/s ({theoretical_m3_per_sec * 3600:,.0f} m3/hr)"
                 )
         else:
+            # manual stop: save accumulated active time
+            tracker.session_elapsed_offset += time.time() - tracker.session_start_time
             widgets['start_stop_btn'].config(text="▶ START", fg=GREEN)
 
     def reset_session(self, char_id: str):
@@ -2481,6 +2499,7 @@ class MiningDashboard:
         tracker.compression_log = {}
         tracker.session_start_time = time.time()
         tracker.session_start_m3 = 0.0
+        tracker.session_elapsed_offset = 0.0
 
         widgets['crit'].config(text="Crits: 0")
         widgets['ore'].config(text="Total: 0.0 m3")
@@ -3588,7 +3607,7 @@ class MiningDashboard:
             return
 
         actual_m3_per_sec = 0.0
-        session_duration = time.time() - tracker.session_start_time
+        session_duration = tracker.get_session_active_duration()
         if session_duration > 10 and tracker.total_m3 > 0:
             actual_m3_per_sec = (tracker.total_m3 - tracker.session_start_m3) / session_duration
 
@@ -4088,7 +4107,7 @@ class MiningDashboard:
 
     def _build_session_report_text(self, tracker: CharacterTracker) -> str:
         # plain text mining report
-        session_duration = time.time() - tracker.session_start_time
+        session_duration = tracker.get_session_active_duration()
         hours = int(session_duration // 3600)
         minutes = int((session_duration % 3600) // 60)
         duration_str = f"{hours}h {minutes:02d}m" if hours > 0 else f"{minutes}m"
