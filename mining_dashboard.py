@@ -482,7 +482,7 @@ def _get_ore_excel_color(ore_name: str) -> str:
 # TOOLTIP HELPER
 # ---------------------------------------------------------------------------
 class ToolTip:
-    # lightweight hover tooltip for tkinter widgets (works on disabled buttons)
+    # hover tooltip
     def __init__(self, widget, text=""):
         self.widget = widget
         self.text = text
@@ -655,24 +655,20 @@ class CharacterTracker:
         self.crit_profiles[self.active_profile] = {"chance": chance, "bonus": bonus}
 
     def get_total_theoretical_m3_per_sec(self) -> float:
-        total = 0.0
-        module_total = 0.0
+        total_yield_sec = 0.0
+
         for module in self.get_active_modules():
             if module.enabled and module.is_configured():
-                module_total += module.get_m3_per_sec()
-        # apply Highwall implant bonus (+5%) to modules
-        if self.get_active_implant():
-            module_total *= 1.05
-        # apply crit avg yield to modules
-        crit = self.get_active_crit()
-        if crit["chance"] > 0 and crit["bonus"] > 0:
-            module_total *= (1 + (crit["chance"] / 100.0) * (crit["bonus"] / 100.0))
-        total += module_total
-        # add drone contribution (no implant/crit bonus)
+                drain_sec = module.get_m3_per_sec()
+                yield_multiplier = 1.054 if self.get_active_implant() else 1.0
+
+                total_yield_sec += drain_sec * yield_multiplier
+
         drone = self.get_active_drones()
         if drone.is_configured():
-            total += drone.get_total_m3_per_sec()
-        return total
+            total_yield_sec += drone.get_total_m3_per_sec()
+
+        return round(total_yield_sec, 1)
 
     def get_active_module_count(self) -> int:
         return sum(1 for m in self.get_active_modules() if m.enabled and m.is_configured())
@@ -3109,32 +3105,22 @@ class MiningDashboard:
         def update_preview(*args):
             module_m3_per_sec = 0.0
             active_count = 0
+
             for mv in module_vars:
                 if mv['enabled'].get():
                     try:
                         y = float(mv['yield'].get()) if mv['yield'].get() else 0.0
                         c = float(mv['cycle'].get()) if mv['cycle'].get() else 0.0
                         if y > 0 and c > 0:
-                            module_m3_per_sec += y / c
+                            module_m3_per_sec += (y / c)
                             active_count += 1
                     except ValueError:
                         pass
-
-            # apply Highwall implant bonus (+5%) to modules
+            
+            # apply Highwall implant bonus (+5%) to modules + a 0.4% because of the max skills bonus
             has_implant = implant_var.get()
             if has_implant and module_m3_per_sec > 0:
-                module_m3_per_sec *= 1.05
-
-            # apply crit avg yield to modules
-            has_crit = False
-            try:
-                cc = float(crit_vars['chance'].get()) if crit_vars['chance'].get() else 0.0
-                cb = float(crit_vars['bonus'].get()) if crit_vars['bonus'].get() else 0.0
-                if cc > 0 and cb > 0 and module_m3_per_sec > 0:
-                    module_m3_per_sec *= (1 + (cc / 100.0) * (cb / 100.0))
-                    has_crit = True
-            except ValueError:
-                pass
+                module_m3_per_sec *= 1.054 
 
             total_m3_per_sec = module_m3_per_sec
 
@@ -3150,18 +3136,18 @@ class MiningDashboard:
                     drone_count = dc
             except ValueError:
                 pass
-
+            
             if total_m3_per_sec > 0:
+                display_sec = round(total_m3_per_sec, 1)
+
                 parts = []
-                if active_count > 0:
-                    parts.append(f"{active_count} mod{'s' if active_count > 1 else ''}")
-                if drone_count > 0:
-                    parts.append(f"{drone_count} drone{'s' if drone_count > 1 else ''}")
-                if has_implant:
-                    parts.append("HW")
+                if active_count > 0: parts.append(f"{active_count} mod{'s' if active_count > 1 else ''}")
+                if drone_count > 0: parts.append(f"{drone_count} drone{'s' if drone_count > 1 else ''}")
+                if has_implant: parts.append("HW")
                 detail = " + ".join(parts)
+
                 preview_label.config(
-                    text=f"◈ Theoretical: {total_m3_per_sec:.2f} m3/s ({total_m3_per_sec * 3600:,.0f} m3/hr) [{detail}]"
+                    text=f"◈ Theoretical: {display_sec:.1f} m3/s ({display_sec * 3600:,.0f} m3/hr) [{detail}]"
                 )
             else:
                 preview_label.config(text="◈ Theoretical: -- m3/s (configure modules)")
