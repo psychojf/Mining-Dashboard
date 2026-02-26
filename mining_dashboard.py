@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 import os
 import re
+import ctypes
 import glob
 import json
+import sys
 import zipfile
 import tempfile
 import threading
@@ -35,6 +37,14 @@ try:
     HAS_OPENPYXL = True
 except ImportError:
     HAS_OPENPYXL = False
+
+try:
+    from PIL import Image, ImageDraw
+    import pystray
+    HAS_PYSTRAY = True
+except ImportError:
+    HAS_PYSTRAY = False
+
 
 # config defaults
 DOCS = os.path.expanduser(r"~\Documents\EVE\logs\Gamelogs\*")
@@ -724,8 +734,25 @@ class CharacterTracker:
 
 class MiningDashboard:
     def __init__(self):
+        try:
+            myappid = 'eve.mining.dashboard.v1' # Arbitrary unique string
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except:
+            pass
+
+        self.tray_icon = None
         self.root = tk.Tk()
+
+        self.root.withdraw()
+
         self.root.title("EVE Mining Dashboard")
+    
+        try:
+            #self.root.iconbitmap("mining_icon.ico") 
+            self.root.iconbitmap(self.get_resource_path("mining_icon.ico"))
+        except:
+            pass
+        
         self.root.attributes("-topmost", True)
         self.root.configure(bg=BORDER)
         self.root.overrideredirect(True)
@@ -738,12 +765,12 @@ class MiningDashboard:
         # Load config
         self.app_config = self.load_config()
         self._apply_saved_app_settings()
-
+    
         # fleet mode
         fleet_cfg = self.app_config.get("fleet", {})
         self.fleet_mode = fleet_cfg.get("enabled", False)
         self.fleet_webhook_url = fleet_cfg.get("webhook_url", "")
-
+    
         # restore position
         saved_geom = self.app_config.get("win_geom", "+100+100")
         try:
@@ -757,52 +784,83 @@ class MiningDashboard:
                 self.root.geometry("+100+100")
         except:
             self.root.geometry("+100+100")
-
+    
         # glob cache
         self._glob_cache: List[str] = []
         self._glob_cache_time: float = 0.0
         self._glob_cache_ttl: float = 5.0  # refresh interval
-
+    
         # discover characters
         self.all_characters = self.discover_all_characters()
-
+    
         # visible characters only
         self.characters = self.get_visible_characters()
-
+    
         # load ship configs
         self.load_ship_configs()
-
+    
         # init log tracking
         for tracker in self.all_characters.values():
             tracker.log_path = self._get_latest_log_for_char(tracker.char_id)
             if tracker.log_path:
                 tracker.log_pos = os.path.getsize(tracker.log_path)
-
+    
         # UI widgets per character
         self.char_widgets: Dict[str, Dict] = {}
-
+    
         # chars container ref
         self.chars_container = None
-
+    
         self.setup_ui()
-
+    
         # window refs
         self.history_window = None
         self.ship_config_dialogs: Dict[str, tk.Toplevel] = {}
         self.config_dialog: Optional[tk.Toplevel] = None
-
+    
         # update loop flag
         self.update_loop_running = True
-
+    
         # drag events
         self.root.bind("<Button-1>", self._start_drag)
         self.root.bind("<B1-Motion>", self._do_drag)
 
+        # Initialize Tray Icon
+        if HAS_PYSTRAY:
+            self.setup_tray()
+
         self.update_loop()
+        self.root.deiconify() 
+        self.root.after(10, self.set_app_window)
         self.root.mainloop()
+    
+    # Add this new helper method to your class
+    def set_app_window(self):
+        # Magic numbers for Windows API
+        GWL_EXSTYLE = -20
+        WS_EX_APPWINDOW = 0x00040000
+        WS_EX_TOOLWINDOW = 0x00000080
+
+        # Get the window handle
+        hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+
+        # Get current style
+        style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+
+        # Update style: Remove ToolWindow, Add AppWindow
+        style = style & ~WS_EX_TOOLWINDOW
+        style = style | WS_EX_APPWINDOW
+
+        # Apply new style
+        ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+
+        self.root.withdraw()
+        self.root.deiconify()
+
+        # Re-apply topmost (sometimes gets lost during style change)
+        self.root.wm_attributes("-topmost", True)
 
     # character discovery
-
     def discover_all_characters(self) -> Dict[str, CharacterTracker]:
         char_names: Dict[str, str] = {}
         char_counts: Dict[str, int] = {}
@@ -871,6 +929,52 @@ class MiningDashboard:
 
         self.root.update_idletasks()
         self.root.geometry("")
+
+    def create_tray_image(self):
+        # Generate a simple tray icon
+        image = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
+        d = ImageDraw.Draw(image)
+        d.ellipse((8, 8, 56, 56), fill="#3dd8e0")
+        return image
+
+    def get_resource_path(self, relative_path):
+        # deak the path to resource, works for dev and PyInstaller
+        if hasattr(sys, '_MEIPASS'):
+            return os.path.join(sys._MEIPASS, relative_path)
+        return os.path.join(os.path.abspath("."), relative_path)
+
+    def setup_tray(self):
+        # detect icon path
+        base_path = os.path.dirname(os.path.abspath(sys.argv[0]))
+        #icon_path = os.path.join(base_path, "mining_icon.ico")
+        icon_path = self.get_resource_path("mining_icon.ico")
+
+        try:
+            if os.path.exists(icon_path):
+                icon_img = Image.open(icon_path)
+            else:
+                # if icon file is missing, create a simple one
+                icon_img = Image.new('RGB', (64, 64), "#3dd8e0")
+        except Exception:
+            icon_img = Image.new('RGB', (64, 64), "#3dd8e0")
+
+        # menu for tray icon
+        menu = pystray.Menu(
+            pystray.MenuItem("Show Dashboard", self.show_window),
+            pystray.MenuItem("EXIT", self.on_close)
+        )
+
+        # create and run tray icon in a separate thread
+        self.tray_icon = pystray.Icon("mining_dash", icon_img, "EVE Mining Dashboard", menu)
+        
+        # we use a thread to run the tray icon so it doesn't block the main UI thread
+        threading.Thread(target=self.tray_icon.run, daemon=True).start()
+
+    def show_window(self, icon=None, item=None):
+        # re-show the window when tray icon is clicked
+        self.root.after(0, self.root.deiconify)
+        self.root.after(0, self.root.lift)
+        self.root.after(0, lambda: self.root.attributes("-topmost", True))
 
     def _get_all_log_files(self) -> List[str]:
         # scan gamelogs dir recursively
@@ -943,8 +1047,25 @@ class MiningDashboard:
         y = self.root.winfo_y() + event.y - self._drag_y
         self.root.geometry(f"+{x}+{y}")
 
-    # main ui
+    def minimize_to_tray(self, event=None):
+        # Hide the window
+        self.root.withdraw()
 
+    def toggle_pin(self, event=None):
+        # Check current state
+        is_top = self.root.attributes("-topmost")
+        new_state = not is_top
+        
+        # Apply new state
+        self.root.attributes("-topmost", new_state)
+        
+        # Update Icon Color
+        if new_state:
+            self.pin_icon.config(fg=CYAN)
+        else:
+            self.pin_icon.config(fg=DIM)
+
+    # main ui
     def setup_ui(self) -> None:
         border_frame = tk.Frame(self.root, bg=BORDER, padx=1, pady=1)
         border_frame.pack(fill="both", expand=True)
@@ -972,10 +1093,24 @@ class MiningDashboard:
             font=("Consolas", 14, "bold"),
             cursor="hand2"
         )
-        close_btn.pack(side="right")
+        close_btn.pack(side="right", padx=(5, 0))
         close_btn.bind("<Button-1>", lambda e: self.on_close())
         close_btn.bind("<Enter>", lambda e: close_btn.config(fg=RED))
         close_btn.bind("<Leave>", lambda e: close_btn.config(fg=DIM))
+
+        # Minimize Button
+        min_btn = tk.Label(
+            top_bar,
+            text="–", # En dash
+            fg=DIM,
+            bg=BG,
+            font=("Consolas", 14, "bold"),
+            cursor="hand2"
+        )
+        min_btn.pack(side="right", padx=(5, 0))
+        min_btn.bind("<Button-1>", self.minimize_to_tray)
+        min_btn.bind("<Enter>", lambda e: min_btn.config(fg=WHITE))
+        min_btn.bind("<Leave>", lambda e: min_btn.config(fg=DIM))
 
         # config gear
         self.config_icon = tk.Label(
@@ -986,10 +1121,26 @@ class MiningDashboard:
             font=("Consolas", 13, "bold"),
             cursor="hand2"
         )
-        self.config_icon.pack(side="right", padx=(0, 8))
+        self.config_icon.pack(side="right", padx=(5, 0))
         self.config_icon.bind("<Button-1>", lambda e: self.show_config_dialog())
         self.config_icon.bind("<Enter>", lambda e: self.config_icon.config(fg=CYAN))
         self.config_icon.bind("<Leave>", lambda e: self.config_icon.config(fg=DIM))
+
+        # 5. Pin Button (Left of Config)
+        self.pin_icon = tk.Label(
+            top_bar,
+            text="📌", 
+            fg=CYAN, # Default is CYAN because __init__ sets topmost=True
+            bg=BG,
+            font=("Consolas", 11),
+            cursor="hand2"
+        )
+        self.pin_icon.pack(side="right", padx=(0, 5))
+        self.pin_icon.bind("<Button-1>", self.toggle_pin)
+
+        # Optional: slight hover effect
+        self.pin_icon.bind("<Enter>", lambda e: self.pin_icon.config(bg="#1a2332"))
+        self.pin_icon.bind("<Leave>", lambda e: self.pin_icon.config(bg=BG))
 
         # character columns
         self.chars_container = tk.Frame(self.inner_frame, bg=BG)
@@ -2269,10 +2420,23 @@ class MiningDashboard:
 
     def on_close(self) -> None:
         self.update_loop_running = False
+        tray = getattr(self, 'tray_icon', None)
+        if tray is not None:
+            try:
+                tray.stop()
+            except Exception:
+                pass
+        
         if self.history_window and self.history_window.winfo_exists():
             self.on_history_close()
+        if self.tray_icon:
+            self.tray_icon.stop()
         self.save_config()
-        self.root.destroy()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        os._exit(0)
 
     # live monitoring loop
 
