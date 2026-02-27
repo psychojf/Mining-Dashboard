@@ -618,16 +618,18 @@ class CharacterTracker:
         self.ore_summary: Dict[str, float] = {}
         self.compression_log: Dict[str, float] = {}
         
+        self.current_cargo: float = 0.0
+
         # ship profiles
         self.ship_profiles: Dict[str, List[MiningModule]] = {"Default": []}
         # drone config
         self.drone_profiles: Dict[str, MiningDrone] = {"Default": MiningDrone()}
         # implant config (Highwall MX-1005 +5%)
         self.implant_profiles: Dict[str, bool] = {"Default": False}
-        # crit config (chance % and bonus %)
-        self.crit_profiles: Dict[str, Dict[str, float]] = {"Default": {"chance": 0.0, "bonus": 0.0}}
+
+        self.cargo_profiles: Dict[str, float] = {"Default": 0.0}
+
         self.active_profile: str = "Default"
-        
         self.session_start_time: float = time.time()
         self.session_start_m3: float = 0.0
         self.session_elapsed_offset: float = 0.0  # accumulated active seconds across pauses
@@ -658,11 +660,12 @@ class CharacterTracker:
     def set_active_implant(self, enabled: bool):
         self.implant_profiles[self.active_profile] = enabled
 
-    def get_active_crit(self) -> Dict[str, float]:
-        return self.crit_profiles.get(self.active_profile, {"chance": 0.0, "bonus": 0.0})
+    # Get active cargo capacity
+    def get_active_capacity(self) -> float:
+        return self.cargo_profiles.get(self.active_profile, 0.0)
 
-    def set_active_crit(self, chance: float, bonus: float):
-        self.crit_profiles[self.active_profile] = {"chance": chance, "bonus": bonus}
+    def set_active_capacity(self, capacity: float):
+        self.cargo_profiles[self.active_profile] = capacity
 
     def get_total_theoretical_m3_per_sec(self) -> float:
         total_yield_sec = 0.0
@@ -696,28 +699,24 @@ class CharacterTracker:
             self.ship_profiles[name] = []
             self.drone_profiles[name] = MiningDrone()
             self.implant_profiles[name] = False
-            self.crit_profiles[name] = {"chance": 0.0, "bonus": 0.0}
+            self.cargo_profiles[name] = 0.0 # Default 0
             return True
         return False
-
+    
     def delete_profile(self, name: str) -> bool:
         if name in self.ship_profiles and len(self.ship_profiles) > 1:
             if self.active_profile == name:
-                # switch to another profile first
                 for profile_name in self.ship_profiles:
                     if profile_name != name:
                         self.active_profile = profile_name
                         break
             del self.ship_profiles[name]
-            if name in self.drone_profiles:
-                del self.drone_profiles[name]
-            if name in self.implant_profiles:
-                del self.implant_profiles[name]
-            if name in self.crit_profiles:
-                del self.crit_profiles[name]
+            if name in self.drone_profiles: del self.drone_profiles[name]
+            if name in self.implant_profiles: del self.implant_profiles[name]
+            if name in self.cargo_profiles: del self.cargo_profiles[name]
             return True
         return False
-
+    
     def rename_profile(self, old_name: str, new_name: str) -> bool:
         if old_name in self.ship_profiles and new_name and new_name not in self.ship_profiles:
             self.ship_profiles[new_name] = self.ship_profiles.pop(old_name)
@@ -725,8 +724,8 @@ class CharacterTracker:
                 self.drone_profiles[new_name] = self.drone_profiles.pop(old_name)
             if old_name in self.implant_profiles:
                 self.implant_profiles[new_name] = self.implant_profiles.pop(old_name)
-            if old_name in self.crit_profiles:
-                self.crit_profiles[new_name] = self.crit_profiles.pop(old_name)
+            if old_name in self.cargo_profiles:
+                self.cargo_profiles[new_name] = self.cargo_profiles.pop(old_name)
             if self.active_profile == old_name:
                 self.active_profile = new_name
             return True
@@ -1261,6 +1260,36 @@ class MiningDashboard:
         ore_label.pack(anchor="w", pady=2)
         ore_label.bind("<Button-3>", show_context_menu)
 
+        # --- NEW: CARGO PROGRESS BAR ---
+        cargo_frame = tk.Frame(col_inner, bg=BG_PANEL)
+        cargo_frame.pack(fill="x", pady=(4, 0))
+
+        # Label for "X m3 / Y m3"
+        cargo_text_label = tk.Label(
+            cargo_frame,
+            text="Cargo: 0 / 0 m3",
+            fg=DIM, bg=BG_PANEL,
+            font=("Consolas", 8)
+        )
+        cargo_text_label.pack(anchor="w")
+
+        # Canvas for the bar
+        cargo_canvas = tk.Canvas(cargo_frame, height=6, bg="#1a2332", highlightthickness=0)
+        cargo_canvas.pack(fill="x", pady=(2, 0))
+
+        # Create the fill rectangle (initially width 0)
+        cargo_bar = cargo_canvas.create_rectangle(0, 0, 0, 6, fill=CYAN, width=0)
+
+        # Label for "Est. Cycles left"
+        cycles_label = tk.Label(
+            cargo_frame,
+            text="Full in: --",
+            fg=DIM, bg=BG_PANEL,
+            font=("Consolas", 8)
+        )
+        cycles_label.pack(anchor="w", pady=(2, 0))
+        # -------------------------------
+
         # control buttons
         control_frame = tk.Frame(col_inner, bg=BG_PANEL)
         control_frame.pack(fill="x", pady=(5, 0))
@@ -1278,6 +1307,16 @@ class MiningDashboard:
             width=10
         )
         start_stop_btn.pack(side="left", padx=(0, 5))
+
+        # NEW: Empty Button
+        empty_btn = tk.Button(
+            control_frame,
+            text="⏏ EMPTY",
+            command=lambda: self.empty_cargo(char_id),
+            bg=BG, fg=CYAN, font=("Consolas", 8, "bold"),
+            relief="flat", cursor="hand2", width=8
+        )
+        empty_btn.pack(side="left", padx=(0, 3))
 
         reset_btn = tk.Button(
             control_frame,
@@ -1332,6 +1371,7 @@ class MiningDashboard:
             disabledforeground=DIM
         )
         send_btn.pack(side="left")
+
         # initial tooltip depends on webhook + data state
         if not has_webhook:
             send_tip_text = "No webhook URL configured \u2014 set it in \u2699 Config"
@@ -1406,13 +1446,15 @@ class MiningDashboard:
             'copy_btn': copy_btn,
             'send_btn': send_btn,
             'copy_tip': copy_tip,
-            'send_tip': send_tip
+            'send_tip': send_tip,
+            'cargo_text': cargo_text_label,
+            'cargo_canvas': cargo_canvas,
+            'cargo_bar': cargo_bar,
+            'cycles_label': cycles_label
         }
-
         return col_outer, widgets
 
     # history window
-
     def show_history(self) -> None:
         if self.history_window is None or not self.history_window.winfo_exists():
             self.history_button.config(state="disabled")
@@ -2478,9 +2520,8 @@ class MiningDashboard:
         # parse mining and compression events
         if not tracker.session_active:
             return
-
         crit_processed = False
-        
+
         for line in data.splitlines():
             # auto-pause: check for notify events that should pause session
             if "(notify)" in line.lower():
@@ -2498,26 +2539,28 @@ class MiningDashboard:
                         w = self.char_widgets[tracker.char_id]
                         w['start_stop_btn'].config(text="▶ START", fg=GREEN)
                     return
-
+                
             # compression event
             compression_match = COMPRESSION_PATTERN.search(line)
+
             if compression_match:
                 ore_type = compression_match.group('ore_type')
                 compressed_amount = float(compression_match.group('amount').replace(",", ""))
-                
+
+                # Calculate Raw Volume (Removed from hold)
                 compression_ratio = COMPRESSION_RATIOS.get(ore_type, 100)
                 original_units = compressed_amount * compression_ratio
-                
                 volume_per_unit, ore_name = self.get_ore_volume(ore_type)
-                total_volume = original_units * volume_per_unit
-                
-                tracker.compression_log[ore_name] = tracker.compression_log.get(ore_name, 0) + total_volume
+                total_raw_volume = original_units * volume_per_unit
+
+                tracker.current_cargo = max(0.0, tracker.current_cargo - total_raw_volume)
+                tracker.compression_log[ore_name] = tracker.compression_log.get(ore_name, 0) + total_raw_volume
                 continue
-            
+
             # skip non-mining lines
             if not MINING_LINE.match(line):
                 continue
-            
+
             # regular mining
             regular_match = REGULAR_MINE_PATTERN.search(line)
             if regular_match:
@@ -2525,6 +2568,7 @@ class MiningDashboard:
                 volume, ore_name = self.get_ore_volume(regular_match.group('ore_type'))
                 total_volume = units * volume
                 tracker.total_m3 += total_volume
+                tracker.current_cargo += total_volume # Add to cargo
                 tracker.ore_summary[ore_name] = tracker.ore_summary.get(ore_name, 0) + total_volume
 
             # critical hit
@@ -2537,6 +2581,7 @@ class MiningDashboard:
                     volume, ore_name = self.get_ore_volume(ore_type_clean)
                     total_volume = units * volume
                     tracker.total_m3 += total_volume
+                    tracker.current_cargo += total_volume # Add to cargo
                     tracker.ore_summary[ore_name] = tracker.ore_summary.get(ore_name, 0) + total_volume
                     tracker.crit_count += 1
                     crit_processed = True
@@ -2581,10 +2626,59 @@ class MiningDashboard:
                 else:
                     w['send_tip'].update_text("No mining data yet \u2014 start mining to enable")
 
+            # --- NEW: UPDATE CARGO BAR ---
+            capacity = tracker.get_active_capacity()
+            current = tracker.current_cargo
+
+            if capacity > 0:
+                pct = min(1.0, current / capacity)
+                w['cargo_text'].config(text=f"Cargo: {current:,.0f} / {capacity:,.0f} m3 ({int(pct*100)}%)")
+
+                # Update Canvas Bar
+                canvas_width = w['cargo_canvas'].winfo_width()
+
+                # Canvas might report width 1 if not drawn yet, handle gracefully
+                if canvas_width > 1:
+                    fill_width = int(canvas_width * pct)
+                    w['cargo_canvas'].coords(w['cargo_bar'], 0, 0, fill_width, 6)
+
+                    # Change color if full
+                    if pct >= 1.0:
+                        w['cargo_canvas'].itemconfig(w['cargo_bar'], fill=RED)
+                    else:
+                        w['cargo_canvas'].itemconfig(w['cargo_bar'], fill=CYAN)
+
+                # Estimate Cycles/Time Left
+                rate = tracker.get_total_theoretical_m3_per_sec()
+                if rate > 0 and pct < 1.0:
+                    remaining = capacity - current
+                    seconds_left = remaining / rate
+
+                    # Try to estimate cycles if we have modules
+                    modules = tracker.get_active_modules()
+                    cycle_time = 0
+
+                    if modules and modules[0].cycle_time > 0:
+                        cycle_time = modules[0].cycle_time
+                    time_str = f"{int(seconds_left//60)}m {int(seconds_left%60)}s"
+
+                    if cycle_time > 0:
+                        cycles_left = seconds_left / cycle_time
+                        w['cycles_label'].config(text=f"Full in: ~{cycles_left:.1f} cycles ({time_str})")
+                    else:
+                        w['cycles_label'].config(text=f"Full in: {time_str}")
+                elif pct >= 1.0:
+                    w['cycles_label'].config(text="Full in: FULL")
+                else:
+                    w['cycles_label'].config(text="Full in: --")
+            else:
+                w['cargo_text'].config(text=f"Cargo: {current:,.0f} m3 (No Cap Set)")
+                w['cargo_canvas'].coords(w['cargo_bar'], 0, 0, 0, 6)
+                w['cycles_label'].config(text="Full in: (Set Capacity in Config)")
+
             self._update_rate_stats(char_id, tracker, w)
 
     # alerts
-
     def trigger_crit_alert(self) -> None:
         if HAS_NOTIFICATION:
             try:
@@ -2599,7 +2693,6 @@ class MiningDashboard:
                 pass
 
     # session control
-
     def toggle_session(self, char_id: str):
         tracker = self.all_characters[char_id]
         widgets = self.char_widgets[char_id]
@@ -2645,6 +2738,12 @@ class MiningDashboard:
             tracker.session_elapsed_offset += time.time() - tracker.session_start_time
             widgets['start_stop_btn'].config(text="▶ START", fg=GREEN)
 
+    def empty_cargo(self, char_id: str):
+        # Manually reset cargo hold status without resetting session stats
+        tracker = self.all_characters[char_id]
+        tracker.current_cargo = 0.0
+        self._update_ui_labels()
+
     def reset_session(self, char_id: str):
         tracker = self.all_characters[char_id]
         widgets = self.char_widgets[char_id]
@@ -2653,6 +2752,7 @@ class MiningDashboard:
             tracker.session_active = False
             widgets['start_stop_btn'].config(text="▶ START", fg=GREEN)
 
+        tracker.current_cargo = 0.0 # Reset cargo
         tracker.crit_count = 0
         tracker.total_m3 = 0.0
         tracker.ore_summary = {}
@@ -2676,7 +2776,6 @@ class MiningDashboard:
             widgets['send_tip'].update_text("No mining data yet \u2014 start mining to enable")
 
     # ship config
-
     def load_ship_configs(self):
         # load ship configs from saved data
         ship_configs = self.app_config.get("ship_configs", {})
@@ -2689,7 +2788,7 @@ class MiningDashboard:
                     tracker.ship_profiles = {}
                     tracker.drone_profiles = {}
                     tracker.implant_profiles = {}
-                    tracker.crit_profiles = {}
+                    tracker.cargo_profiles = {}
                     for profile_name, profile_data in cfg["profiles"].items():
                         modules = []
                         for mod_data in profile_data.get("modules", []):
@@ -2705,13 +2804,10 @@ class MiningDashboard:
                         
                         # load implant config
                         tracker.implant_profiles[profile_name] = profile_data.get("highwall_implant", False)
-                        
-                        # load crit config
-                        tracker.crit_profiles[profile_name] = {
-                            "chance": profile_data.get("crit_chance", 0.0),
-                            "bonus": profile_data.get("crit_bonus", 0.0)
-                        }
                     
+                        # load cargo config
+                        tracker.cargo_profiles[profile_name] = profile_data.get("cargo_capacity", 0.0)
+
                     tracker.active_profile = cfg.get("active_profile", "Default")
                     
                     # ensure active profile exists
@@ -2723,7 +2819,7 @@ class MiningDashboard:
                             tracker.ship_profiles["Default"] = []
                             tracker.drone_profiles["Default"] = MiningDrone()
                             tracker.implant_profiles["Default"] = False
-                            tracker.crit_profiles["Default"] = {"chance": 0.0, "bonus": 0.0}
+                            tracker.cargo_profiles["Default"] = 0.0
                 
                 elif "modules" in cfg:
                     modules_data = cfg.get("modules", [])
@@ -2733,7 +2829,7 @@ class MiningDashboard:
                     tracker.ship_profiles = {"Default": modules}
                     tracker.drone_profiles = {"Default": MiningDrone()}
                     tracker.implant_profiles = {"Default": False}
-                    tracker.crit_profiles = {"Default": {"chance": 0.0, "bonus": 0.0}}
+                    tracker.cargo_profiles["Default"] = 0.0
                     tracker.active_profile = "Default"
                 
                 # yield/cycle
@@ -2750,7 +2846,7 @@ class MiningDashboard:
                         tracker.ship_profiles = {"Default": [module]}
                         tracker.drone_profiles = {"Default": MiningDrone()}
                         tracker.implant_profiles = {"Default": False}
-                        tracker.crit_profiles = {"Default": {"chance": 0.0, "bonus": 0.0}}
+                        tracker.cargo_profiles["Default"] = 0.0
                         tracker.active_profile = "Default"
 
     def save_ship_configs(self):
@@ -2761,13 +2857,12 @@ class MiningDashboard:
             for profile_name, modules in tracker.ship_profiles.items():
                 drone = tracker.drone_profiles.get(profile_name, MiningDrone())
                 implant = tracker.implant_profiles.get(profile_name, False)
-                crit = tracker.crit_profiles.get(profile_name, {"chance": 0.0, "bonus": 0.0})
+                capacity = tracker.cargo_profiles.get(profile_name, 0.0)
                 profiles_data[profile_name] = {
                     "modules": [m.to_dict() for m in modules],
                     "drones": drone.to_dict(),
                     "highwall_implant": implant,
-                    "crit_chance": crit.get("chance", 0.0),
-                    "crit_bonus": crit.get("bonus", 0.0)
+                    "cargo_capacity": capacity
                 }
             
             ship_configs[char_id] = {
@@ -2865,7 +2960,6 @@ class MiningDashboard:
         close_btn.bind("<Leave>", lambda e: close_btn.config(fg=DIM))
 
         # profile management
-        
         profile_frame = tk.Frame(main_frame, bg=BG_PANEL)
         profile_frame.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(0, 15))
         
@@ -2905,7 +2999,7 @@ class MiningDashboard:
         btn_new = tk.Button(
             profile_frame,
             text="+ NEW",
-            command=lambda: self.create_new_profile(tracker, current_profile, profile_menu, module_vars, update_preview, dialog, drone_vars, implant_var, crit_vars),
+            command=lambda: self.create_new_profile(tracker, current_profile, profile_menu, module_vars, update_preview, dialog, drone_vars, implant_var, cargo_cap_var),
             bg=BG,
             fg=GREEN,
             font=("Consolas", 8, "bold"),
@@ -2931,7 +3025,7 @@ class MiningDashboard:
         btn_delete = tk.Button(
             profile_frame,
             text="✕ DELETE",
-            command=lambda: self.delete_current_profile(tracker, current_profile, profile_menu, module_vars, update_preview, dialog, drone_vars, implant_var, crit_vars),
+            command=lambda: self.delete_current_profile(tracker, current_profile, profile_menu, module_vars, update_preview, dialog, drone_vars, implant_var, cargo_cap_var),
             bg=BG,
             fg=RED,
             font=("Consolas", 8, "bold"),
@@ -2986,12 +3080,7 @@ class MiningDashboard:
             
             # Load implant state
             implant_var.set(tracker.implant_profiles.get(profile_name, False))
-            
-            # Load crit config
-            crit = tracker.crit_profiles.get(profile_name, {"chance": 0.0, "bonus": 0.0})
-            crit_vars['chance'].set(str(crit["chance"]) if crit["chance"] > 0 else "")
-            crit_vars['bonus'].set(str(crit["bonus"]) if crit["bonus"] > 0 else "")
-            
+                  
             update_preview()
 
         # module input fields
@@ -3079,7 +3168,6 @@ class MiningDashboard:
         sep_row = 4 + MAX_MODULES
 
         # mining drones
-
         drones_label = tk.Label(
             main_frame,
             text="◆ MINING DRONES",
@@ -3150,7 +3238,6 @@ class MiningDashboard:
         }
 
         # mining implant
-
         implant_row = drone_row + 3
 
         implant_label = tk.Label(
@@ -3195,63 +3282,38 @@ class MiningDashboard:
 
         preview_row = implant_cb_row + 1
 
-        # critical hits avg
-
-        crit_section_row = preview_row
-
-        crit_label = tk.Label(
+        # CARGO CAPACITY SECTION
+        cargo_row = preview_row
+        cargo_label = tk.Label(
             main_frame,
-            text="◆ CRITICAL HITS (avg yield)",
+            text="◆ CARGO HOLD",
             fg=CYAN,
             bg=BG_PANEL,
             font=("Consolas", 9, "bold")
         )
-        crit_label.grid(row=crit_section_row, column=0, columnspan=4, sticky="w", pady=(15, 5))
-
-        active_crit = tracker.get_active_crit()
-
-        # crit chance
-        crit_row1 = crit_section_row + 1
-        tk.Label(main_frame, text="Crit Chance:", fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).grid(row=crit_row1, column=0, columnspan=2, sticky="e", padx=(0, 5), pady=3)
-
-        crit_chance_var = tk.StringVar(value=str(active_crit["chance"]) if active_crit["chance"] > 0 else "")
-        crit_chance_entry = tk.Entry(
+        cargo_label.grid(row=cargo_row, column=0, columnspan=4, sticky="w", pady=(15, 5))
+        active_capacity = tracker.get_active_capacity()
+        cargo_row1 = cargo_row + 1
+        tk.Label(main_frame, text="Capacity (m3):", fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).grid(row=cargo_row1, column=0, columnspan=2, sticky="e", padx=(0, 5), pady=3)
+        cargo_cap_var = tk.StringVar(value=str(active_capacity) if active_capacity > 0 else "")
+        cargo_cap_entry = tk.Entry(
             main_frame,
-            textvariable=crit_chance_var,
-            width=8,
+            textvariable=cargo_cap_var,
+            width=12,
             font=("Consolas", 9),
             bg=BG,
             fg=WHITE,
             insertbackground=CYAN
         )
-        crit_chance_entry.grid(row=crit_row1, column=2, sticky="w", padx=5, pady=3)
 
-        tk.Label(main_frame, text="% (e.g. 1.50)", fg=GOLD, bg=BG_PANEL, font=("Consolas", 8)).grid(row=crit_row1, column=3, sticky="w", padx=5, pady=3)
+        cargo_cap_entry.grid(row=cargo_row1, column=2, sticky="w", padx=5, pady=3)
+        tk.Label(main_frame, text="(e.g. 11500)", fg=GOLD, bg=BG_PANEL, font=("Consolas", 8)).grid(row=cargo_row1, column=3, sticky="w", padx=5, pady=3)
 
-        # crit bonus
-        crit_row2 = crit_section_row + 2
-        tk.Label(main_frame, text="Crit Bonus:", fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).grid(row=crit_row2, column=0, columnspan=2, sticky="e", padx=(0, 5), pady=3)
+        # Update preview_row for the next element (Buttons)
+        preview_row = cargo_row1 + 1
 
-        crit_bonus_var = tk.StringVar(value=str(active_crit["bonus"]) if active_crit["bonus"] > 0 else "")
-        crit_bonus_entry = tk.Entry(
-            main_frame,
-            textvariable=crit_bonus_var,
-            width=8,
-            font=("Consolas", 9),
-            bg=BG,
-            fg=WHITE,
-            insertbackground=CYAN
-        )
-        crit_bonus_entry.grid(row=crit_row2, column=2, sticky="w", padx=5, pady=3)
-
-        tk.Label(main_frame, text="% (e.g. 250)", fg=GOLD, bg=BG_PANEL, font=("Consolas", 8)).grid(row=crit_row2, column=3, sticky="w", padx=5, pady=3)
-
-        crit_vars = {
-            'chance': crit_chance_var,
-            'bonus': crit_bonus_var
-        }
-
-        preview_row = crit_row2 + 1
+        # Add trace to update if needed (though capacity doesn't affect m3/s preview)
+        # cargo_cap_var.trace_add('write', update_preview)
 
         # theoretical preview
         preview_frame = tk.Frame(main_frame, bg=BG, padx=10, pady=8)
@@ -3327,9 +3389,6 @@ class MiningDashboard:
 
         implant_var.trace_add('write', update_preview)
 
-        crit_vars['chance'].trace_add('write', update_preview)
-        crit_vars['bonus'].trace_add('write', update_preview)
-
         # profile change handler
         def on_profile_change(*args):
             new_profile = current_profile.get()
@@ -3369,13 +3428,12 @@ class MiningDashboard:
             # save implant
             tracker.implant_profiles[tracker.active_profile] = implant_var.get()
             
-            # save crit
+            # save cargo
             try:
-                cc = float(crit_vars['chance'].get()) if crit_vars['chance'].get() else 0.0
-                cb = float(crit_vars['bonus'].get()) if crit_vars['bonus'].get() else 0.0
+                cap = float(cargo_cap_var.get()) if cargo_cap_var.get() else 0.0
             except ValueError:
-                cc, cb = 0.0, 0.0
-            tracker.crit_profiles[tracker.active_profile] = {"chance": cc, "bonus": cb}
+                cap = 0.0
+            tracker.cargo_profiles[tracker.active_profile] = cap
 
         update_preview()
 
@@ -3511,7 +3569,7 @@ class MiningDashboard:
         return result[0] if result[0] else None
 
     def create_new_profile(self, tracker: CharacterTracker, current_profile_var: tk.StringVar,
-                          profile_menu: tk.OptionMenu, module_vars: List, update_preview_fn, parent_dialog=None, drone_vars=None, implant_var=None, crit_vars=None):
+                          profile_menu: tk.OptionMenu, module_vars: List, update_preview_fn, parent_dialog=None, drone_vars=None, implant_var=None, cargo_cap_var=None):
         parent = parent_dialog or self.root
         new_name = self._ask_string_centered(
             "New Profile",
@@ -3550,9 +3608,8 @@ class MiningDashboard:
                 if implant_var:
                     implant_var.set(False)
 
-                if crit_vars:
-                    crit_vars['chance'].set("")
-                    crit_vars['bonus'].set("")
+                if 'cargo_cap_var' in locals(): # Make sure variable exists in scope
+                    cargo_cap_var.set("")
                 
                 update_preview_fn()
             else:
@@ -3592,7 +3649,7 @@ class MiningDashboard:
                                     parent=parent)
 
     def delete_current_profile(self, tracker: CharacterTracker, current_profile_var: tk.StringVar,
-                               profile_menu: tk.OptionMenu, module_vars: List, update_preview_fn, parent_dialog=None, drone_vars=None, implant_var=None, crit_vars=None):
+                               profile_menu: tk.OptionMenu, module_vars: List, update_preview_fn, parent_dialog=None, drone_vars=None, implant_var=None, cargo_cap_var=None):
         profile_to_delete = tracker.active_profile
         parent = parent_dialog or self.root
         
@@ -3647,12 +3704,6 @@ class MiningDashboard:
                 # load implant state
                 if implant_var:
                     implant_var.set(tracker.get_active_implant())
-                
-                # load crit config
-                if crit_vars:
-                    crit = tracker.get_active_crit()
-                    crit_vars['chance'].set(str(crit["chance"]) if crit["chance"] > 0 else "")
-                    crit_vars['bonus'].set(str(crit["bonus"]) if crit["bonus"] > 0 else "")
                 
                 update_preview_fn()
 
