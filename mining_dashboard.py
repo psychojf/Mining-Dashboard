@@ -72,8 +72,72 @@ GOLD = "#ffd700"
 DIM = "#5a7085"
 WHITE = "#ffffff"
 
+# static geometry defaults
+DEFAULT_WIN_W = 360   # base window width for 1 character
+DEFAULT_WIN_H = 450   # base window height
+EXTRA_COL_W = 346     # width added per additional character (340 col + 6 gap)
+
 # colors per character
 CHAR_ACCENTS = [CYAN, "#ff9f43", "#a29bfe", "#e056fd", "#26de81", "#fc5c65", "#45aaf2", "#fed330"]
+
+# ---------------------------------------------------------------------------
+# NEON PROGRESS BAR DRAWING HELPERS
+# ---------------------------------------------------------------------------
+def draw_neon_bar(canvas, pct, bar_color=CYAN, glow=True, segments=True):
+    # draw a neon-style progress bar on a canvas widget
+    # pct: 0.0 to 1.0 (fraction filled)
+    # bar_color: main fill color
+    # glow: draw outer glow layers
+    # segments: draw internal segment dots
+    canvas.delete("all")
+    canvas.update_idletasks()
+    w = canvas.winfo_width()
+    h = canvas.winfo_height()
+    if w <= 1:
+        return
+    pad = 2
+
+    # dark track background with subtle border
+    canvas.create_rectangle(0, 0, w, h, fill="#0a1520", outline="#1a2a3a", width=1)
+
+    if pct <= 0:
+        return
+
+    fill_w = max(4, int((w - pad * 2) * min(1.0, pct)))
+
+    if glow:
+        # outer glow layers (expanding outward from fill)
+        glow_colors = ["#0a2530", "#0c2d3a", "#0e3545", "#103d50"]
+        for i, gc in enumerate(glow_colors):
+            expand = len(glow_colors) - i
+            y1 = max(pad, pad + 1 - expand)
+            y2 = min(h - pad, h - pad - 1 + expand)
+            canvas.create_rectangle(pad, y1, pad + fill_w, y2, fill=gc, outline="")
+
+    # main fill bar
+    canvas.create_rectangle(pad, pad + 2, pad + fill_w, h - pad - 2,
+                            fill=bar_color, outline="")
+
+    # bright highlight stripe on top (shimmer effect)
+    canvas.create_rectangle(pad, pad + 2, pad + fill_w, pad + 4,
+                            fill="#7eeef5" if bar_color == CYAN else "#ff8a80", outline="")
+
+    if segments and fill_w > 20:
+        # draw internal glow segments (pill dots) for neon look
+        seg_w = 6
+        seg_gap = 4
+        seg_y1 = pad + 4
+        seg_y2 = h - pad - 3
+        x = pad + 4
+        while x + seg_w < pad + fill_w - 2:
+            canvas.create_oval(x, seg_y1, x + seg_w, seg_y2,
+                             fill="#7eeef5" if bar_color == CYAN else "#ff8a80",
+                             outline="")
+            x += seg_w + seg_gap
+
+    # bottom edge subtle shadow
+    canvas.create_rectangle(pad, h - pad - 2, pad + fill_w, h - pad,
+                            fill="#062030", outline="")
 
 # ---------------------------------------------------------------------------
 # ORE / ICE / GAS DATA  (SDE-aware, auto-updatable)
@@ -906,6 +970,10 @@ class MiningDashboard:
                 widget.destroy()
             self.char_widgets.clear()
 
+            # reset any old column configurations
+            for i in range(max(len(self.all_characters), 10)):
+                self.chars_container.columnconfigure(i, weight=0, uniform="")
+
         if not self.characters:
             tk.Label(
                 self.chars_container,
@@ -913,12 +981,12 @@ class MiningDashboard:
                 fg=DIM, bg=BG,
                 font=("Consolas", 9),
                 justify="center"
-            ).pack(pady=20)
+            ).grid(row=0, column=0, pady=20)
         else:
             for i, (char_id, tracker) in enumerate(self.characters.items()):
                 accent = CHAR_ACCENTS[i % len(CHAR_ACCENTS)]
                 col_frame, widgets = self._create_char_column(self.chars_container, tracker, accent, char_id)
-                col_frame.pack(side="left", fill="both", expand=True, padx=3)
+                col_frame.grid(row=0, column=i, sticky="nsew", padx=3)
                 self.char_widgets[char_id] = widgets
                 self.update_ship_indicator(char_id)
                 
@@ -926,8 +994,20 @@ class MiningDashboard:
                 if tracker.session_active:
                     widgets['start_stop_btn'].config(text="■ STOP", fg=RED)
 
+            # force all columns to equal width
+            for i in range(len(self.characters)):
+                self.chars_container.columnconfigure(i, weight=1, uniform="char_col")
+
         self.root.update_idletasks()
         self.root.geometry("")
+        self._apply_static_geometry()
+
+    def _apply_static_geometry(self):
+        # set window size based on static defaults
+        # ONLY sets size, does NOT touch window position
+        n_cols = max(1, len(self.characters)) if self.characters else 1
+        target_w = DEFAULT_WIN_W + (n_cols - 1) * EXTRA_COL_W
+        self.root.geometry(f"{target_w}x{DEFAULT_WIN_H}")
 
     def create_tray_image(self):
         # Generate a simple tray icon
@@ -1152,14 +1232,18 @@ class MiningDashboard:
                 fg=DIM, bg=BG,
                 font=("Consolas", 9),
                 justify="center"
-            ).pack(pady=20)
+            ).grid(row=0, column=0, pady=20)
         else:
             for i, (char_id, tracker) in enumerate(self.characters.items()):
                 accent = CHAR_ACCENTS[i % len(CHAR_ACCENTS)]
                 col_frame, widgets = self._create_char_column(self.chars_container, tracker, accent, char_id)
-                col_frame.pack(side="left", fill="both", expand=True, padx=3)
+                col_frame.grid(row=0, column=i, sticky="nsew", padx=3)
                 self.char_widgets[char_id] = widgets
                 self.update_ship_indicator(char_id)
+
+            # force all columns to equal width
+            for i in range(len(self.characters)):
+                self.chars_container.columnconfigure(i, weight=1, uniform="char_col")
 
         # history button
         self.history_button = tk.Button(
@@ -1175,6 +1259,9 @@ class MiningDashboard:
             activeforeground=CYAN
         )
         self.history_button.pack(fill="x", padx=20, pady=(12, 15))
+
+        # apply static geometry
+        self._apply_static_geometry()
 
     def _create_char_column(self, parent, tracker: CharacterTracker, accent_color: str, char_id: str):
         col_outer = tk.Frame(parent, bg=BORDER, padx=1, pady=1)
@@ -1260,7 +1347,7 @@ class MiningDashboard:
         ore_label.pack(anchor="w", pady=2)
         ore_label.bind("<Button-3>", show_context_menu)
 
-        # --- NEW: CARGO PROGRESS BAR ---
+        # --- NEON CARGO PROGRESS BAR ---
         cargo_frame = tk.Frame(col_inner, bg=BG_PANEL)
         cargo_frame.pack(fill="x", pady=(4, 0))
 
@@ -1273,12 +1360,11 @@ class MiningDashboard:
         )
         cargo_text_label.pack(anchor="w")
 
-        # Canvas for the bar
-        cargo_canvas = tk.Canvas(cargo_frame, height=6, bg="#1a2332", highlightthickness=0)
-        cargo_canvas.pack(fill="x", pady=(2, 0))
-
-        # Create the fill rectangle (initially width 0)
-        cargo_bar = cargo_canvas.create_rectangle(0, 0, 0, 6, fill=CYAN, width=0)
+        # Canvas for the neon bar (with cyan border)
+        cargo_bar_border = tk.Frame(cargo_frame, bg=CYAN, padx=1, pady=1)
+        cargo_bar_border.pack(fill="x", pady=(2, 0))
+        cargo_canvas = tk.Canvas(cargo_bar_border, height=18, bg="#0a1520", highlightthickness=0)
+        cargo_canvas.pack(fill="x")
 
         # Label for "Est. Cycles left"
         cycles_label = tk.Label(
@@ -1449,7 +1535,6 @@ class MiningDashboard:
             'send_tip': send_tip,
             'cargo_text': cargo_text_label,
             'cargo_canvas': cargo_canvas,
-            'cargo_bar': cargo_bar,
             'cycles_label': cycles_label
         }
         return col_outer, widgets
@@ -2626,7 +2711,7 @@ class MiningDashboard:
                 else:
                     w['send_tip'].update_text("No mining data yet \u2014 start mining to enable")
 
-            # --- NEW: UPDATE CARGO BAR ---
+            # --- UPDATE NEON CARGO BAR ---
             capacity = tracker.get_active_capacity()
             current = tracker.current_cargo
 
@@ -2634,19 +2719,9 @@ class MiningDashboard:
                 pct = min(1.0, current / capacity)
                 w['cargo_text'].config(text=f"Cargo: {current:,.0f} / {capacity:,.0f} m3 ({int(pct*100)}%)")
 
-                # Update Canvas Bar
-                canvas_width = w['cargo_canvas'].winfo_width()
-
-                # Canvas might report width 1 if not drawn yet, handle gracefully
-                if canvas_width > 1:
-                    fill_width = int(canvas_width * pct)
-                    w['cargo_canvas'].coords(w['cargo_bar'], 0, 0, fill_width, 6)
-
-                    # Change color if full
-                    if pct >= 1.0:
-                        w['cargo_canvas'].itemconfig(w['cargo_bar'], fill=RED)
-                    else:
-                        w['cargo_canvas'].itemconfig(w['cargo_bar'], fill=CYAN)
+                # Draw neon bar with color based on fill level
+                bar_color = RED if pct >= 1.0 else CYAN
+                draw_neon_bar(w['cargo_canvas'], pct, bar_color=bar_color)
 
                 # Estimate Cycles/Time Left
                 rate = tracker.get_total_theoretical_m3_per_sec()
@@ -2673,7 +2748,7 @@ class MiningDashboard:
                     w['cycles_label'].config(text="Full in: --")
             else:
                 w['cargo_text'].config(text=f"Cargo: {current:,.0f} m3 (No Cap Set)")
-                w['cargo_canvas'].coords(w['cargo_bar'], 0, 0, 0, 6)
+                draw_neon_bar(w['cargo_canvas'], 0)
                 w['cycles_label'].config(text="Full in: (Set Capacity in Config)")
 
             self._update_rate_stats(char_id, tracker, w)
@@ -4114,15 +4189,47 @@ class MiningDashboard:
         )
         sde_status_label.grid(row=12, column=0, columnspan=3, sticky="w")
 
+        # neon progress bar for SDE download
+        sde_bar_frame = tk.Frame(fields_frame, bg=BG_PANEL)
+        sde_bar_frame.grid(row=13, column=0, columnspan=3, sticky="ew", pady=(4, 2))
+        sde_bar_border = tk.Frame(sde_bar_frame, bg=CYAN, padx=1, pady=1)
+        sde_bar_border.pack(fill="x")
+        sde_bar_canvas = tk.Canvas(sde_bar_border, height=20, bg="#0a1520", highlightthickness=0)
+        sde_bar_canvas.pack(fill="x")
+        sde_bar_pct_label = tk.Label(
+            sde_bar_frame,
+            text="",
+            fg=CYAN,
+            bg=BG_PANEL,
+            font=("Consolas", 8, "bold"),
+            anchor="center"
+        )
+        sde_bar_pct_label.pack(fill="x")
+        # hide until download starts
+        sde_bar_frame.grid_remove()
+
         def do_sde_update():
             global ORE_VOLUMES, COMPRESSION_RATIOS, SDE_INFO
             update_btn.config(state="disabled", text="↻ UPDATING...")
+            sde_bar_frame.grid()
+            draw_neon_bar(sde_bar_canvas, 0)
+            sde_bar_pct_label.config(text="")
 
             def run_update():
                 try:
                     def progress(msg):
                         try:
-                            dialog.after(0, lambda: sde_status_var.set(msg))
+                            # parse percentage from "Downloading SDE... X.X MB (Y%)"
+                            pct_match = re.search(r'\((\d+)%\)', msg)
+                            if pct_match:
+                                pct_val = int(pct_match.group(1)) / 100.0
+                                dialog.after(0, lambda p=pct_val, m=msg: _update_sde_progress(p, m))
+                            elif "Extracting" in msg:
+                                dialog.after(0, lambda m=msg: _update_sde_progress(0.85, m))
+                            elif "Parsing" in msg:
+                                dialog.after(0, lambda m=msg: _update_sde_progress(0.95, m))
+                            else:
+                                dialog.after(0, lambda m=msg: _update_sde_progress(0.02, m))
                         except Exception:
                             pass
 
@@ -4140,6 +4247,8 @@ class MiningDashboard:
                         sde_info_var.set(new_info)
                         sde_status_var.set(f"✔ Updated! {SDE_INFO['ore_count']} ores loaded.")
                         sde_status_label.config(fg=GREEN)
+                        draw_neon_bar(sde_bar_canvas, 1.0)
+                        sde_bar_pct_label.config(text="100% ─ Complete!", fg=GREEN)
                         update_btn.config(state="normal", text="↻ UPDATE ORE DATA")
 
                     try:
@@ -4151,6 +4260,8 @@ class MiningDashboard:
                     def on_error():
                         sde_status_var.set(f"✖ Error: {str(e)[:60]}")
                         sde_status_label.config(fg=RED)
+                        draw_neon_bar(sde_bar_canvas, 0, bar_color=RED)
+                        sde_bar_pct_label.config(text="Download failed", fg=RED)
                         update_btn.config(state="normal", text="↻ UPDATE ORE DATA")
                     try:
                         dialog.after(0, on_error)
@@ -4158,6 +4269,13 @@ class MiningDashboard:
                         pass
 
             threading.Thread(target=run_update, daemon=True).start()
+
+        def _update_sde_progress(pct_val, msg):
+            # update bar and label during download
+            sde_status_var.set(msg)
+            draw_neon_bar(sde_bar_canvas, pct_val)
+            pct_display = int(pct_val * 100)
+            sde_bar_pct_label.config(text=f"{pct_display}%", fg=CYAN)
 
         update_btn = tk.Button(
             fields_frame,
@@ -4170,7 +4288,7 @@ class MiningDashboard:
             cursor="hand2",
             width=20
         )
-        update_btn.grid(row=13, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        update_btn.grid(row=14, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         # Buttons
         btn_frame = tk.Frame(main_frame, bg=BG_PANEL)
