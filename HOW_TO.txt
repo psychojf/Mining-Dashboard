@@ -1,127 +1,82 @@
-## How to Use
+## How to Use EVE Mining Dashboard
 
 ### Managing Characters
 
 Your characters will be detected automatically from existing game logs.
-Click the **⚙ gear icon** in the top-right corner to open the Config dialog.
+Click the **gear icon** (⚙) in the top-right corner to open the Config dialog.
 
-- Check or uncheck characters to show or hide them on the dashboard.
+- Check or uncheck characters to show or hide them on the main dashboard hub.
 - Adjust the **Gamelogs Path** if your EVE logs are in a non-default location.
 - Set the **Update Interval** (how often the dashboard reads new log data, minimum 250 ms).
 - Set the **Default History Days** for the history window.
+- Click the **UPDATE ORE DATA** button to fetch the latest EVE Online SDE ore volumes and compression ratios.
+
+
+### Detachable Character Frames (NEW)
+
+You can pop individual characters out of the main dashboard to freely arrange them on your screen:
+
+- **Detach:** Click the pop-out icon (⇱) next to the character's profile name. The character will move into its own floating window.
+- **Move:** Click and drag the custom title bar (e.g., `★ JF GELINAS`) at the top of the detached window.
+- **Resize:** Click and drag the small resize grip (◢) in the bottom right corner of the detached window.
+- **Auto-Fit:** Double-click the custom title bar to instantly snap the window back to its default, perfectly fitted size.
+- **Session Breakdown (Accordion):** Click the `v SESSION BREAKDOWN v` button at the bottom of the frame to expand/collapse the detailed ore stats. 
+- **Re-attach:** Click the close button (✕) on the detached window's title bar, or click the re-attach icon (⇲).
+- **Persistence:** The app will automatically remember which characters are detached, along with their exact window sizes and screen coordinates, the next time you launch it!
+
 
 ### Configuring Ship Fittings
 
-From the main UI, right-click on a character's column and select **Ship Config** to open the fitting dialog.
+Right-click anywhere on a character's column (or inside their detached frame) and select **⚙ Ship Config** to open the fitting dialog.
 
-- **Profiles**: Create multiple ship profiles (e.g. one for ore mining, one for ice, one for gas). Use the dropdown to switch between them.
-- **Mining Modules**: Configure up to 5 mining modules per profile. For each module, enter:
-  - **Module Name** -- a label for your reference (e.g. "Strip Miner I")
-  - **Yield (m³/cycle)** -- the m³ your module extracts per cycle (check your fitting window in EVE)
+- **Profiles:** Create multiple ship profiles (e.g., one for ore mining, one for ice, one for gas) using the `+ NEW`, `✎ RENAME`, and `✕ DELETE` buttons. Use the dropdown to switch between them. (You can also switch profiles quickly by clicking the gold `<Profile>` text directly on the dashboard).
+- **Modules:** Configure up to 5 mining modules per profile. For each module, enter:
+  - **Module Name** -- a label for your reference (e.g., "Strip Miner I")
+  - **Yield (m3/cycle)** -- the m3 your module extracts per cycle (check your fitting window in EVE)
   - **Cycle Time (s)** -- the duration of one mining cycle in seconds
-- **Mining Drones**: Configure your drone flight -- number of drones (up to 5), yield per drone, and cycle time. Drone contribution is added to theoretical rate separately from modules.
-- **Mining Implant**: Toggle the Highwall MX-1005 implant checkbox to add +5% yield to modules only (does not affect drones, same as in-game).
-- **Critical Hits**: Enter your module's crit chance (%) and crit bonus yield (%) to include statistical crit averaging in the theoretical rate. This matches how PYFA calculates expected yield.
-- **Enable/Disable**: Use the checkboxes to toggle individual modules on or off.
-- The **Theoretical rate** preview updates live as you adjust values.
-- Click **SAVE** to apply.
+- **Drones:** Configure active mining drones, their yield, and cycle time.
+- **Implant:** Toggle the Highwall MX-1005 implant for a +5% module yield boost.
+- **Cargo Hold:** Set your ship's capacity to enable the visual cargo progress bar and time-to-full estimates.
+- **Enable/Disable:** Use the checkboxes to toggle individual modules on or off. The **Theoretical rate** preview updates live. Click **SAVE** to apply.
+
 
 ### Start Monitoring
 
-1. After setting up the ship fitting and selecting which characters to display, you're ready.
+1. Set up your ship fitting and ensure your character is visible/detached where you want them.
 2. Click **▶ START** under a character's column to begin tracking that session.
-3. Mine as usual in EVE -- stats update in real time.
-4. Click **■ STOP** to pause tracking, or **↺ RESET** to clear all stats for that character.
+3. Mine as usual in EVE — stats, crits, cargo bars, and the actual m3/s rate will update in real time.
+4. Click the **v SESSION BREAKDOWN v** toggle to see exactly how much of each ore you have mined.
+5. Click **■ STOP** to pause tracking, or **↺ RESET** to clear all stats and cargo for that character.
+6. Click **⏏ EMPTY** to reset just the cargo progress bar while keeping your session stats intact.
 
-### Auto-Stop
 
-The dashboard automatically pauses your session when it detects these events in the game logs:
-- **Cargo hold is full**
-- **Asteroid is depleted**
-- **Target lost** (targeting attempt failed)
+### Fleet Mode & Discord Reporting
 
-When auto-stop triggers, the START button and Actual rate label turn **gold** with the stop reason displayed. This prevents idle time from diluting your actual m³/s rate. Press START again to resume.
+Fleet Mode lets you report mining session statistics directly to a Discord channel via webhook.
 
-### Fleet Reporting (Discord)
+1. Open **⚙ Config** and paste your Discord webhook URL into the **Webhook URL** field under the Fleet section.
+2. Once you have active mining data for a session, two buttons will become available for that character:
+   - **⎘ Copy to Clipboard:** Copies a plain-text session report (duration, crits, total m3, and ore breakdown).
+   - **▲ Send to Discord:** Opens a preview dialog and posts the report directly to your Discord server.
 
-Share your mining session with your fleet:
-
-1. Set your **Discord Webhook URL** in ⚙ Config → Fleet section.
-2. Mine until you have session data (the session breakdown must have content).
-3. Click **⎘ Copy to Clipboard** to copy a text report, or **▲ Send to Discord** to post it to your webhook channel.
-4. Send to Discord shows a preview and requires confirmation before sending.
-
-Both buttons are disabled until you have mining data in the current session. Hover over disabled buttons to see why they're inactive.
 
 ### Viewing Mining History
 
-Click the **◈ HISTORY** button at the bottom of the dashboard.
+Click the **◈ HISTORY** button at the bottom of the main dashboard.
 
 - Enter the number of days to analyze and press Enter or click **↻ REFRESH STATS**.
-- The history window shows total m³ mined per character with a per-ore breakdown.
-- Data is read from all game log files within the selected time range.
+- The history window shows total m3 mined per character with a per-ore breakdown based on your saved logs.
+- **◈ EXPORT EXCEL:** Click this to generate a comprehensive `.xlsx` file containing a Summary sheet, Ore Pivot tables, and Daily breakdowns for each character.
 
-### Excel Export
 
-From the History window, click **◈ EXPORT EXCEL** to choose an export format:
-
-- **Summary Export** -- Combined totals + per-character sheets with ore breakdown
-- **Daily Breakdown** -- Days as rows, ores as columns, with daily totals
-- **Ore Pivot** -- Ores as rows, characters as columns (compare who mines what)
-- **Full Export** -- All three formats in a single workbook
-
-Exports are styled with an EVE Online dark theme (dark backgrounds, cyan headers, ore-category colors, gold totals). Requires `openpyxl`.
-
-### Updating the Ore Database
-
-The dashboard ships with built-in ore data from EVE's Static Data Export. To update it with the latest data from CCP:
-
-1. Open ⚙ Config.
-2. Click **Update from SDE** in the Ore Database section.
-3. The dashboard will download and parse the latest SDE automatically.
-
-Updated data is cached locally in `ore_data_cache.json`.
-
-## Configuration File
+### Configuration File
 
 Settings are saved automatically to `mining_config.json` in the same folder as the script. This includes:
 
-- Window positions (dashboard, history, ship config dialogs)
-- Character visibility selections
-- All ship profiles and module/drone/implant/crit configurations
-- Discord webhook URL
-- Application settings (paths, intervals, export directory, etc.)
+- All window positions and geometries (Main Dashboard, History, Config, and *each individual Detached Frame*).
+- Which frames are currently detached.
+- Character visibility selections.
+- All ship profiles, modules, drones, and cargo configurations.
+- Application settings (paths, intervals, webhooks).
 
-Delete this file to reset everything to defaults.
-
-## Supported Ore Types
-
-The dashboard recognizes all major EVE ore categories including their grade variants (II-Grade, III-Grade, IV-Grade):
-
-- **Standard ores**: Veldspar, Scordite, Pyroxeres, Plagioclase, Omber, Kernite
-- **Low-sec ores**: Jaspet, Hemorphite, Hedbergite
-- **Null-sec ores**: Gneiss, Dark Ochre, Spodumain, Crokite, Bistot, Arkonor, Mercoxit
-- **Moon ores**: R4 through R64 (Zeolites, Cobaltite, Otavite, Carnotite, Xenotime, etc.)
-- **Ice**: Blue Ice, Clear Icicle, Glacial Mass, White Glaze, and others
-- **Pochven ores**: Bezdnacine, Rakovene, Talassonite
-- **Gas clouds**: All Cytoserocin, Mykoserocin, and Fullerite variants
-- **Special ores**: Ueganite, Prismaticite, Ducinium, Eifyrium, Griemeer, Hezorime, Kylixium, Mordunium
-
-## Tips
-
-- The dashboard window is **draggable** -- click and drag anywhere on the background.
-- The overlay is semi-transparent (85% opacity) by default.
-- If a character's ship indicator diamond is **green**, at least one module is configured. **Red** means no modules are set up yet.
-- The active profile name is shown in angle brackets next to each character's name.
-- All window positions are saved between sessions.
-- Hover over disabled buttons for tooltip hints explaining why they're inactive.
-- Right-click on a character column for quick access to Ship Config.
-
-## Troubleshooting
-
-- **No characters detected**: Make sure EVE has been launched at least once and game logs exist in the Gamelogs folder. Check the path in Config if using a custom location.
-- **Stats not updating**: Ensure the session is started (button should say "■ STOP"). The dashboard only tracks mining events while a session is active.
-- **No sound on critical hits**: Place an `alert_crit.wav` file in the same folder as the script. Any .wav file will work as long as it's named `alert_crit.wav`.
-- **Session auto-stopped unexpectedly**: Check the gold text on the Actual line -- it shows the reason (cargo full, asteroid depleted, or target lost).
-- **Buttons greyed out**: Hover over them to see the tooltip explaining why. Copy/Send buttons require mining data in the current session. Send also requires a valid webhook URL.
-- **Excel export missing**: Install openpyxl with `pip install openpyxl`.
+*Note: Delete `mining_config.json` if you ever need to completely reset the application to its default state.*
