@@ -1212,6 +1212,7 @@ class MiningDashboard:
             top.configure(bg=BORDER)
             top.overrideredirect(True)
             top.attributes("-topmost", True)
+            top.attributes("-alpha", 0.85)
             self.detached_windows[char_id] = top
             
             top._user_resized = False # Flag for accordion behavior
@@ -2135,6 +2136,8 @@ class MiningDashboard:
     def _process_log_data(self, tracker: CharacterTracker, data: str) -> None:
         if not tracker.session_active: return
         crit_processed = False
+        last_mined_volume = 0.0
+        last_mined_ore = "Unknown"
 
         for line in data.splitlines():
             if "(notify)" in line.lower():
@@ -2172,6 +2175,8 @@ class MiningDashboard:
                 tracker.total_m3 += total_volume
                 tracker.current_cargo += total_volume
                 tracker.ore_summary[ore_name] = tracker.ore_summary.get(ore_name, 0) + total_volume
+                last_mined_volume = volume
+                last_mined_ore = ore_name
 
             if CRITICAL_HIT_KEYWORD in line and not crit_processed:
                 crit_match = CRIT_MINE_PATTERN.search(line)
@@ -2187,15 +2192,16 @@ class MiningDashboard:
                     tracker.crit_m3 += total_volume
                     crit_processed = True
                     self.trigger_crit_alert()
+                    last_mined_volume = volume
+                    last_mined_ore = ore_name
 
             residue_match = RESIDUE_PATTERN.search(line)
-            if residue_match:
+            if residue_match and last_mined_volume > 0:
                 units = float(residue_match.group('amount').replace(",", ""))
-                volume, ore_name = self.get_ore_volume(line.split("units of")[-1].strip() if "units of" in line else "Unknown")
-                total_volume = units * volume
+                total_volume = units * last_mined_volume
                 tracker.total_residue_m3 += total_volume
                 if not hasattr(tracker, 'residue_summary'): tracker.residue_summary = {}
-                tracker.residue_summary[ore_name] = tracker.residue_summary.get(ore_name, 0) + total_volume
+                tracker.residue_summary[last_mined_ore] = tracker.residue_summary.get(last_mined_ore, 0) + total_volume
 
     def _update_ui_labels(self) -> None:
         for char_id, tracker in self.characters.items():
