@@ -400,6 +400,7 @@ MINING_LINE = re.compile(r'^\[.*?\]\s+\(mining\)', re.IGNORECASE)
 REGULAR_MINE_PATTERN = re.compile(r"You mined <font size=12><color=[^>]+>(?P<amount>\d+)<color=[^>]+><font size=10> units of <color=[^>]+><font size=12>(?P<ore_type>[^\r\n<]+)", re.IGNORECASE)
 CRIT_MINE_PATTERN = re.compile(r"You mined an additional <color=[^>]+><font size=12>(?P<amount>\d+)<color=[^>]+><font size=10> units of <color=[^>]+><font size=12>(?P<ore_type>[^\r\n<]+)", re.IGNORECASE | re.DOTALL)
 COMPRESSION_PATTERN = re.compile(r'Successfully compressed (?P<ore_type>[^\s]+) into (?P<amount>[\d,]+) Compressed', re.IGNORECASE)
+RESIDUE_PATTERN = re.compile(r"Additional <font size=12><color=[^>]+>(?P<amount>\d+)<color=[^>]+><font size=10> units depleted from asteroid as residue", re.IGNORECASE)
 LISTENER_LINE = re.compile(r'Listener:\s*(.+)', re.IGNORECASE)
 LOG_TIMESTAMP = re.compile(r'^\[\s*(\d{4}\.\d{2}\.\d{2})\s+\d{2}:\d{2}:\d{2}\s*\]')
 
@@ -531,6 +532,8 @@ class CharacterTracker:
         self.total_m3: float = 0.0
         self.ore_summary: Dict[str, float] = {}
         self.compression_log: Dict[str, float] = {}
+        self.total_residue_m3: float = 0.0
+        self.residue_summary: Dict[str, float] = {}
         self.current_cargo: float = 0.0
         self.ship_profiles: Dict[str, List[MiningModule]] = {"Default": []}
         self.drone_profiles: Dict[str, MiningDrone] = {"Default": MiningDrone()}
@@ -1051,6 +1054,10 @@ class MiningDashboard:
         ore_label.pack(anchor="w", pady=2)
         ore_label.bind("<Button-3>", show_context_menu)
 
+        residue_label = tk.Label(stats_frame, text="Residue: 0.0 m3", fg=RED, bg=BG_PANEL, font=("Consolas", 9))
+        residue_label.pack(anchor="w", pady=(0, 2))
+        residue_label.bind("<Button-3>", show_context_menu)
+
         cargo_frame = tk.Frame(col_inner, bg=BG_PANEL)
         cargo_frame.pack(fill="x", pady=(4, 0))
 
@@ -1144,7 +1151,7 @@ class MiningDashboard:
             toggle_btn.config(text="^  HIDE BREAKDOWN  ^")
 
         widgets = {
-            'crit': crit_label, 'ore': ore_label, 'summary': summary_box,
+            'crit': crit_label, 'ore': ore_label, 'residue': residue_label, 'summary': summary_box,
             'theoretical': theoretical_label, 'actual': actual_label,
             'start_stop_btn': start_stop_btn, 'ship_indicator': ship_indicator,
             'profile_label': profile_label, 'fleet_frame': fleet_frame,
@@ -1185,7 +1192,7 @@ class MiningDashboard:
             toggle_btn.config(text="^  HIDE BREAKDOWN  ^")
 
         widgets = {
-            'crit': crit_label, 'ore': ore_label, 'summary': summary_box,
+            'crit': crit_label, 'ore': ore_label, 'residue': residue_label, 'summary': summary_box,
             'theoretical': theoretical_label, 'actual': actual_label,
             'start_stop_btn': start_stop_btn, 'ship_indicator': ship_indicator,
             'profile_label': profile_label, 'fleet_frame': fleet_frame,
@@ -2181,6 +2188,15 @@ class MiningDashboard:
                     crit_processed = True
                     self.trigger_crit_alert()
 
+            residue_match = RESIDUE_PATTERN.search(line)
+            if residue_match:
+                units = float(residue_match.group('amount').replace(",", ""))
+                volume, ore_name = self.get_ore_volume(line.split("units of")[-1].strip() if "units of" in line else "Unknown")
+                total_volume = units * volume
+                tracker.total_residue_m3 += total_volume
+                if not hasattr(tracker, 'residue_summary'): tracker.residue_summary = {}
+                tracker.residue_summary[ore_name] = tracker.residue_summary.get(ore_name, 0) + total_volume
+
     def _update_ui_labels(self) -> None:
         for char_id, tracker in self.characters.items():
             if char_id not in self.char_widgets: continue
@@ -2188,6 +2204,7 @@ class MiningDashboard:
             w['crit'].config(text=f"Crit Bonus: {tracker.crit_m3:,.1f} m³ ({tracker.crit_count})")
             session_m3 = tracker.total_m3 - tracker.session_start_m3
             w['ore'].config(text=f"Total: {session_m3:,.1f} m3")
+            w['residue'].config(text=f"Residue: {tracker.total_residue_m3:,.1f} m3")
     
             if tracker.ore_summary:
                 summary = "\n".join([f"{ore_name}: {volume:,.1f} m3" for ore_name, volume in tracker.ore_summary.items()])
@@ -2303,12 +2320,15 @@ class MiningDashboard:
         tracker.total_m3 = 0.0
         tracker.ore_summary = {}
         tracker.compression_log = {}
+        tracker.total_residue_m3 = 0.0
+        tracker.residue_summary = {}
         tracker.session_start_time = time.time()
         tracker.session_start_m3 = 0.0
         tracker.session_elapsed_offset = 0.0
 
         widgets['crit'].config(text="Crit Bonus: 0.0 m³")
         widgets['ore'].config(text="Total: 0.0 m3")
+        widgets['residue'].config(text="Residue: 0.0 m3")
         widgets['summary'].config(text="Waiting...")
         widgets['actual'].config(text="◉ Actual: -- m3/s")
         widgets['copy_btn'].config(state="disabled", fg=DIM)
