@@ -62,15 +62,15 @@ AUTO_PAUSE_KEYWORDS = [
 ]
 
 # color palette
-BG = "#080808"          # Deep native EVE black/dark grey
-BG_PANEL = "#121212"    # Slightly lighter inner panel
-BORDER = "#2a2a2a"      # Muted EVE window border
-CYAN = "#8b9fa9"        # Soft EVE UI blue/grey instead of neon cyan
-RED = "#cc3325"         # Keep for STOP/alerts
-GREEN = "#55a34f"       # Muted EVE success green
-GOLD = "#d4b45d"        # Native EVE yellow/gold
-DIM = "#777777"         # Dimmed UI text
-WHITE = "#e5e5e5"       # Off-white for less glare
+BG = "#0b0e17"
+BG_PANEL = "#111827"
+BORDER = "#1e3a4a"
+CYAN = "#3dd8e0"
+RED = "#cc3325"
+GREEN = "#2ecc40"
+GOLD = "#ffd700"
+DIM = "#5a7085"
+WHITE = "#ffffff"
 
 # static geometry defaults
 DEFAULT_WIN_W = 360   # base window width for 1 character
@@ -95,10 +95,10 @@ def draw_neon_bar(canvas, pct, bar_color=CYAN, glow=True, segments=True):
     h = canvas.winfo_height()
     if w <= 1:
         return
-    pad = 1
+    pad = 2
 
     # dark track background with subtle border
-    canvas.create_rectangle(0, 0, w, h, fill="#080808", outline="#2a2a2a", width=1)
+    canvas.create_rectangle(0, 0, w, h, fill="#0a1520", outline="#1a2a3a", width=1)
 
     if pct <= 0:
         return
@@ -114,20 +114,26 @@ def draw_neon_bar(canvas, pct, bar_color=CYAN, glow=True, segments=True):
             y2 = min(h - pad, h - pad - 1 + expand)
             canvas.create_rectangle(pad, y1, pad + fill_w, y2, fill=gc, outline="")
 
-    # main flat fill bar
-    canvas.create_rectangle(pad, pad, pad + fill_w, h - pad, fill=bar_color, outline="")
+    # main fill bar
+    canvas.create_rectangle(pad, pad + 2, pad + fill_w, h - pad - 2,
+                            fill=bar_color, outline="")
 
     # bright highlight stripe on top (shimmer effect)
     canvas.create_rectangle(pad, pad + 2, pad + fill_w, pad + 4,
                             fill="#7eeef5" if bar_color == CYAN else "#ff8a80", outline="")
 
-    if segments and fill_w > 10:
-        # draw subtle vertical separator lines for an industrial segmented look
-        seg_gap = 15
-        x = pad + seg_gap
-        while x < pad + fill_w:
-            canvas.create_line(x, pad, x, h - pad, fill="#080808", width=1)
-            x += seg_gap
+    if segments and fill_w > 20:
+        # draw internal glow segments (pill dots) for neon look
+        seg_w = 6
+        seg_gap = 4
+        seg_y1 = pad + 4
+        seg_y2 = h - pad - 3
+        x = pad + 4
+        while x + seg_w < pad + fill_w - 2:
+            canvas.create_oval(x, seg_y1, x + seg_w, seg_y2,
+                             fill="#7eeef5" if bar_color == CYAN else "#ff8a80",
+                             outline="")
+            x += seg_w + seg_gap
 
     # bottom edge subtle shadow
     canvas.create_rectangle(pad, h - pad - 2, pad + fill_w, h - pad,
@@ -393,7 +399,6 @@ else:
 MINING_LINE = re.compile(r'^\[.*?\]\s+\(mining\)', re.IGNORECASE)
 REGULAR_MINE_PATTERN = re.compile(r"You mined <font size=12><color=[^>]+>(?P<amount>\d+)<color=[^>]+><font size=10> units of <color=[^>]+><font size=12>(?P<ore_type>[^\r\n<]+)", re.IGNORECASE)
 CRIT_MINE_PATTERN = re.compile(r"You mined an additional <color=[^>]+><font size=12>(?P<amount>\d+)<color=[^>]+><font size=10> units of <color=[^>]+><font size=12>(?P<ore_type>[^\r\n<]+)", re.IGNORECASE | re.DOTALL)
-RESIDUE_PATTERN = re.compile(r"Additional <font size=12><color=[^>]+>(?P<amount>\d+)<color=[^>]+><font size=10> units depleted from asteroid as residue", re.IGNORECASE)
 COMPRESSION_PATTERN = re.compile(r'Successfully compressed (?P<ore_type>[^\s]+) into (?P<amount>[\d,]+) Compressed', re.IGNORECASE)
 LISTENER_LINE = re.compile(r'Listener:\s*(.+)', re.IGNORECASE)
 LOG_TIMESTAMP = re.compile(r'^\[\s*(\d{4}\.\d{2}\.\d{2})\s+\d{2}:\d{2}:\d{2}\s*\]')
@@ -522,11 +527,9 @@ class CharacterTracker:
         self.log_path: Optional[str] = None
         self.log_pos: int = 0
         self.crit_count: int = 0
+        self.crit_m3: float = 0.0
         self.total_m3: float = 0.0
-        self.total_residue_m3: float = 0.0
-        self.last_ore_mined: str = "Unknown"
         self.ore_summary: Dict[str, float] = {}
-        self.residue_summary: Dict[str, float] = {}
         self.compression_log: Dict[str, float] = {}
         self.current_cargo: float = 0.0
         self.ship_profiles: Dict[str, List[MiningModule]] = {"Default": []}
@@ -1040,17 +1043,13 @@ class MiningDashboard:
         stats_frame.pack(fill="x")
         stats_frame.bind("<Button-3>", show_context_menu)
 
-        crit_label = tk.Label(stats_frame, text="Crits: 0", fg=GOLD, bg=BG_PANEL, font=("Consolas", 11, "bold"))
+        crit_label = tk.Label(stats_frame, text="Crit Bonus: 0.0 m³", fg=GOLD, bg=BG_PANEL, font=("Consolas", 11, "bold"))
         crit_label.pack(anchor="w", pady=2)
         crit_label.bind("<Button-3>", show_context_menu)
 
         ore_label = tk.Label(stats_frame, text="Total: 0.0 m3", fg=GREEN, bg=BG_PANEL, font=("Consolas", 11, "bold"))
         ore_label.pack(anchor="w", pady=2)
         ore_label.bind("<Button-3>", show_context_menu)
-
-        residue_label = tk.Label(stats_frame, text="Residue: 0.0 m3", fg=RED, bg=BG_PANEL, font=("Consolas", 9))
-        residue_label.pack(anchor="w", pady=(0, 2))
-        residue_label.bind("<Button-3>", show_context_menu)
 
         cargo_frame = tk.Frame(col_inner, bg=BG_PANEL)
         cargo_frame.pack(fill="x", pady=(4, 0))
@@ -1130,6 +1129,8 @@ class MiningDashboard:
 
         toggle_btn.config(command=toggle_session_breakdown)
 
+        # CLEANUP: Removed the duplicate "── SESSION BREAKDOWN ──" label here
+
         summary_outer = tk.Frame(session_container, bg=BORDER, padx=1, pady=1)
         summary_outer.pack(fill="both", pady=(0, 3))
         summary_outer.bind("<Button-3>", show_context_menu)
@@ -1143,7 +1144,48 @@ class MiningDashboard:
             toggle_btn.config(text="^  HIDE BREAKDOWN  ^")
 
         widgets = {
-            'crit': crit_label, 'ore': ore_label, 'residue': residue_label, 'summary': summary_box,
+            'crit': crit_label, 'ore': ore_label, 'summary': summary_box,
+            'theoretical': theoretical_label, 'actual': actual_label,
+            'start_stop_btn': start_stop_btn, 'ship_indicator': ship_indicator,
+            'profile_label': profile_label, 'fleet_frame': fleet_frame,
+            'copy_btn': copy_btn, 'send_btn': send_btn,
+            'copy_tip': copy_tip, 'send_tip': send_tip,
+            'cargo_text': cargo_text_label, 'cargo_canvas': cargo_canvas,
+            'cycles_label': cycles_label
+        }
+        return col_outer, widgets
+
+        def toggle_session_breakdown():
+            if session_container.winfo_ismapped():
+                session_container.pack_forget()
+                toggle_btn.config(text="v  SESSION BREAKDOWN  v")
+            else:
+                session_container.pack(fill="both", expand=True)
+                toggle_btn.config(text="^  HIDE BREAKDOWN  ^")
+            
+            if is_detached:
+                col_outer.winfo_toplevel().geometry("")
+
+        toggle_btn.config(command=toggle_session_breakdown)
+
+        # separator = tk.Label(session_container, text="── SESSION BREAKDOWN ──", fg=accent_color, bg=BG_PANEL, font=("Consolas", 8, "bold"))
+        # separator.pack(pady=(5, 3))
+        # separator.bind("<Button-3>", show_context_menu)
+
+        summary_outer = tk.Frame(session_container, bg=BORDER, padx=1, pady=1)
+        summary_outer.pack(fill="both", pady=(0, 3))
+        summary_outer.bind("<Button-3>", show_context_menu)
+
+        summary_box = tk.Label(summary_outer, text="Waiting...", fg=WHITE, bg=BG_PANEL, font=("Consolas", 9), justify="left", padx=8, pady=8)
+        summary_box.pack(fill="both")
+        summary_box.bind("<Button-3>", show_context_menu)
+
+        if not is_detached:
+            session_container.pack(fill="both", expand=True)
+            toggle_btn.config(text="^  HIDE BREAKDOWN  ^")
+
+        widgets = {
+            'crit': crit_label, 'ore': ore_label, 'summary': summary_box,
             'theoretical': theoretical_label, 'actual': actual_label,
             'start_stop_btn': start_stop_btn, 'ship_indicator': ship_indicator,
             'profile_label': profile_label, 'fleet_frame': fleet_frame,
@@ -1163,7 +1205,6 @@ class MiningDashboard:
             top.configure(bg=BORDER)
             top.overrideredirect(True)
             top.attributes("-topmost", True)
-            top.attributes("-alpha", 0.80)
             self.detached_windows[char_id] = top
             
             top._user_resized = False # Flag for accordion behavior
@@ -2116,29 +2157,14 @@ class MiningDashboard:
 
             if not MINING_LINE.match(line): continue
 
-            residue_match = RESIDUE_PATTERN.search(line)
-            if residue_match:
-                units = float(residue_match.group('amount').replace(",", ""))
-                ore_name = getattr(tracker, 'last_ore_mined', "Unknown")
-                volume, _ = self.get_ore_volume(ore_name)
-                total_volume = units * volume
-                tracker.total_residue_m3 += total_volume
-                if ore_name != "Unknown":
-                    # Failsafe: create the dictionary on the fly if it somehow gets deleted again
-                    if not hasattr(tracker, 'residue_summary'): tracker.residue_summary = {}
-                    tracker.residue_summary[ore_name] = tracker.residue_summary.get(ore_name, 0) + total_volume
-                continue
-
             regular_match = REGULAR_MINE_PATTERN.search(line)
             if regular_match:
                 units = float(regular_match.group('amount').replace(",", ""))
                 volume, ore_name = self.get_ore_volume(regular_match.group('ore_type'))
-                tracker.last_ore_mined = ore_name
                 total_volume = units * volume
                 tracker.total_m3 += total_volume
                 tracker.current_cargo += total_volume
                 tracker.ore_summary[ore_name] = tracker.ore_summary.get(ore_name, 0) + total_volume
-                continue
 
             if CRITICAL_HIT_KEYWORD in line and not crit_processed:
                 crit_match = CRIT_MINE_PATTERN.search(line)
@@ -2146,12 +2172,12 @@ class MiningDashboard:
                     units = float(crit_match.group('amount').replace(",", ""))
                     ore_type_clean = crit_match.group('ore_type').split('<')[0].split('\r')[0].split('\n')[0].strip()
                     volume, ore_name = self.get_ore_volume(ore_type_clean)
-                    tracker.last_ore_mined = ore_name
                     total_volume = units * volume
                     tracker.total_m3 += total_volume
                     tracker.current_cargo += total_volume
                     tracker.ore_summary[ore_name] = tracker.ore_summary.get(ore_name, 0) + total_volume
                     tracker.crit_count += 1
+                    tracker.crit_m3 += total_volume
                     crit_processed = True
                     self.trigger_crit_alert()
 
@@ -2159,10 +2185,9 @@ class MiningDashboard:
         for char_id, tracker in self.characters.items():
             if char_id not in self.char_widgets: continue
             w = self.char_widgets[char_id]
-            w['crit'].config(text=f"Crits: {tracker.crit_count}")
+            w['crit'].config(text=f"Crit Bonus: {tracker.crit_m3:,.1f} m³ ({tracker.crit_count})")
             session_m3 = tracker.total_m3 - tracker.session_start_m3
             w['ore'].config(text=f"Total: {session_m3:,.1f} m3")
-            w['residue'].config(text=f"Residue: {tracker.total_residue_m3:,.1f} m3")
     
             if tracker.ore_summary:
                 summary = "\n".join([f"{ore_name}: {volume:,.1f} m3" for ore_name, volume in tracker.ore_summary.items()])
@@ -2274,19 +2299,16 @@ class MiningDashboard:
 
         tracker.current_cargo = 0.0
         tracker.crit_count = 0
+        tracker.crit_m3 = 0.0
         tracker.total_m3 = 0.0
-        tracker.total_residue_m3 = 0.0
-        tracker.last_ore_mined = "Unknown"
         tracker.ore_summary = {}
-        tracker.residue_summary = {}
         tracker.compression_log = {}
         tracker.session_start_time = time.time()
         tracker.session_start_m3 = 0.0
         tracker.session_elapsed_offset = 0.0
 
-        widgets['crit'].config(text="Crits: 0")
+        widgets['crit'].config(text="Crit Bonus: 0.0 m³")
         widgets['ore'].config(text="Total: 0.0 m3")
-        widgets['residue'].config(text="Residue: 0.0 m3")
         widgets['summary'].config(text="Waiting...")
         widgets['actual'].config(text="◉ Actual: -- m3/s")
         widgets['copy_btn'].config(state="disabled", fg=DIM)
@@ -3193,7 +3215,7 @@ class MiningDashboard:
 
         lines = [
             f"Mining Report — {tracker.char_name}",
-            f"Session: {duration_str} | Crits: {tracker.crit_count}",
+            f"Session: {duration_str} | Crit Bonus: {tracker.crit_m3:,.1f} m³ ({tracker.crit_count})",
             ""
         ]
 
