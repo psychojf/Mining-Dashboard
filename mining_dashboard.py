@@ -18,13 +18,10 @@ from tkinter import ttk
 from tkinter import messagebox
 import time
 
-# Conditional imports
-try:
-    from playsound import playsound
-    HAS_PLAYSOUND = True
-except ImportError:
-    HAS_PLAYSOUND = False
+# winsound is built-in on Windows - no external dependency needed
+import winsound
 
+# Conditional imports
 try:
     from plyer import notification
     HAS_NOTIFICATION = True
@@ -454,11 +451,13 @@ _ORE_CATEGORIES = {
     "Ducinium": "ffeaa7", "Ueganite": "ffeaa7", "Mutanite": "ffeaa7",
 }
 
+@lru_cache(maxsize=512)
 def _get_ore_excel_color(ore_name: str) -> str:
+    ore_lower = ore_name.lower()
     for base_name, color in _ORE_CATEGORIES.items():
-        if base_name.lower() in ore_name.lower(): return color
-    if "cytoserocin" in ore_name.lower() or "mykoserocin" in ore_name.lower(): return "55efc4"
-    if "fullerite" in ore_name.lower(): return "00b894"
+        if base_name.lower() in ore_lower: return color
+    if "cytoserocin" in ore_lower or "mykoserocin" in ore_lower: return "55efc4"
+    if "fullerite" in ore_lower: return "00b894"
     return "ffffff"
 
 class ToolTip:
@@ -631,7 +630,7 @@ class CharacterTracker:
             self.ship_profiles[new_name] = self.ship_profiles.pop(old_name)
             if old_name in self.drone_profiles: self.drone_profiles[new_name] = self.drone_profiles.pop(old_name)
             if old_name in self.implant_profiles: self.implant_profiles[new_name] = self.implant_profiles.pop(old_name)
-            if old_name in old_name in self.cargo_profiles: self.cargo_profiles[new_name] = self.cargo_profiles.pop(old_name)
+            if old_name in self.cargo_profiles: self.cargo_profiles[new_name] = self.cargo_profiles.pop(old_name)
             if self.active_profile == old_name: self.active_profile = new_name
             return True
         return False
@@ -2128,20 +2127,26 @@ class MiningDashboard:
                 tracker.residue_summary[last_mined_ore] = tracker.residue_summary.get(last_mined_ore, 0) + total_volume
 
     def _update_ui_labels(self) -> None:
+        char_widgets = self.char_widgets  # Local reference for faster lookup
+        has_webhook = self._is_valid_webhook_url()
+        
         for char_id, tracker in self.characters.items():
-            if char_id not in self.char_widgets: continue
-            w = self.char_widgets[char_id]
+            if char_id not in char_widgets: continue
+            w = char_widgets[char_id]
+            
             w['crit'].config(text=f"Crit Bonus: {tracker.crit_m3:,.1f} m³ ({tracker.crit_count})")
             session_m3 = tracker.total_m3 - tracker.session_start_m3
             w['ore'].config(text=f"Total: {session_m3:,.1f} m3")
             w['residue'].config(text=f"Residue: {tracker.total_residue_m3:,.1f} m3")
     
-            if tracker.ore_summary: summary = "\n".join([f"{ore_name}: {volume:,.1f} m3" for ore_name, volume in tracker.ore_summary.items()])
-            else: summary = "Waiting..."
+            ore_summary = tracker.ore_summary
+            if ore_summary:
+                summary = "\n".join([f"{ore_name}: {volume:,.1f} m3" for ore_name, volume in ore_summary.items()])
+            else:
+                summary = "Waiting..."
             w['summary'].config(text=summary)
     
-            has_data = bool(tracker.ore_summary)
-            has_webhook = self._is_valid_webhook_url()
+            has_data = bool(ore_summary)
             if has_data:
                 w['copy_btn'].config(state="normal", fg=GOLD)
                 w['copy_tip'].update_text("Copy session report to clipboard")
@@ -2192,9 +2197,10 @@ class MiningDashboard:
         if HAS_NOTIFICATION:
             try: notification.notify(title="MINING", message="Critical Hit!", timeout=1)
             except Exception: pass
-        # Only play the sound if the toggle is True
-        if HAS_PLAYSOUND and PLAY_CRIT_SOUND and os.path.exists(CRIT_SOUND_FILE):
-            try: playsound(CRIT_SOUND_FILE, block=False)
+        # Use native winsound instead of playsound dependency
+        if PLAY_CRIT_SOUND and os.path.exists(CRIT_SOUND_FILE):
+            try:
+                winsound.PlaySound(CRIT_SOUND_FILE, winsound.SND_FILENAME | winsound.SND_ASYNC)
             except Exception: pass
 
     def toggle_session(self, char_id: str):
