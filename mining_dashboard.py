@@ -664,6 +664,10 @@ class MiningDashboard:
 
         self._drag_x = 0
         self._drag_y = 0
+        self._is_rolled_up = False      # EVE-style window shade: collapsed to title bar only
+        self._full_height = 0           # Full height saved before collapsing
+        self._hidden_widgets = []       # Content widgets hidden during rollup
+        self._last_toggle_time = 0.0    # Cooldown to prevent rapid double-toggle
         self._apply_saved_app_settings()
     
         fleet_cfg = self.app_config.get("fleet", {})
@@ -692,6 +696,8 @@ class MiningDashboard:
     
         self.char_widgets: Dict[str, Dict] = {}
         self.floating_windows: Dict[str, tk.Toplevel] = {}
+        # Restore hidden state from config so show/hide survives restarts
+        self.hidden_windows: set = set(self.app_config.get("hidden_windows", []))
         self.chars_container = None
         
         self.history_window = None
@@ -730,6 +736,10 @@ class MiningDashboard:
             top.destroy()
         self.floating_windows.clear()
         self.char_widgets.clear()
+        # Persist hidden state before clearing so it survives the rebuild
+        self._save_hidden_windows()
+        hidden_before_rebuild = set(self.hidden_windows)
+        self.hidden_windows.clear()
         
         # Destroy Main UI inner frame
         for widget in self.root.winfo_children():
@@ -738,6 +748,15 @@ class MiningDashboard:
         self.root.configure(bg=BORDER)
         self.setup_ui()
         self.sync_floating_windows()
+
+        # Re-apply hidden state — withdraw any windows that were hidden before the theme change
+        for cid in hidden_before_rebuild:
+            if cid in self.floating_windows:
+                top = self.floating_windows[cid]
+                if top.winfo_exists():
+                    top.withdraw()
+                self.hidden_windows.add(cid)
+        self.rebuild_dashboard()
 
     def set_app_window(self):
         GWL_EXSTYLE = -20
@@ -787,8 +806,13 @@ class MiningDashboard:
         self.sync_floating_windows()
         self.rebuild_dashboard()
 
+    def _save_hidden_windows(self):
+        # Persist the current hidden set to config so it survives restarts and theme rebuilds
+        self.app_config["hidden_windows"] = list(self.hidden_windows)
+        self.save_config()
+
     def sync_floating_windows(self):
-        # Destroy windows no longer visible
+        # Destroy windows for chars removed from config (visible_characters unchecked)
         for cid in list(self.floating_windows.keys()):
             if cid not in self.characters:
                 top = self.floating_windows[cid]
@@ -797,13 +821,21 @@ class MiningDashboard:
                 del self.floating_windows[cid]
                 if cid in self.char_widgets:
                     del self.char_widgets[cid]
+                # Also clear hidden state since window is gone
+                self.hidden_windows.discard(cid)
+                self._save_hidden_windows()
 
-        # Create windows for newly visible
+        # Create windows for chars newly added to config
         offset_i = len(self.floating_windows)
         for cid, tracker in self.characters.items():
             if cid not in self.floating_windows:
                 self.create_floating_window(cid, offset_i)
                 offset_i += 1
+                # If this char was hidden before (restored from config), withdraw immediately
+                if cid in self.hidden_windows:
+                    top = self.floating_windows.get(cid)
+                    if top and top.winfo_exists():
+                        top.withdraw()
 
     def create_floating_window(self, char_id: str, offset_i: int):
         tracker = self.all_characters[char_id]
@@ -844,11 +876,12 @@ class MiningDashboard:
         title.bind("<Double-Button-1>", reset_size)
 
         def hide_character():
-            # Simply uncheck from config to hide it
-            vis = self.app_config.get("visible_characters", [])
-            if char_id in vis:
-                vis.remove(char_id)
-                self.save_visible_characters(vis)
+            # Withdraw the window and mark as hidden — does NOT remove from fleet/config
+            # To remove from fleet entirely, use the Config UI checkbox
+            top.withdraw()
+            self.hidden_windows.add(char_id)
+            self._save_hidden_windows()
+            self.rebuild_dashboard()  # refresh hub row button to show SHOW
 
         close_btn = tk.Label(top_bar, text="✕", fg=DIM, bg=BG_PANEL, font=("Consolas", 12, "bold"), cursor="hand2")
         close_btn.pack(side="right", padx=(0, 5))
@@ -954,18 +987,39 @@ class MiningDashboard:
                 
                 tk.Label(row_f, text=f"★ {tracker.char_name.upper()}", fg=accent, bg=BG_PANEL, font=("Consolas", 10, "bold")).pack(side="left")
                 
-                def hide_char(c_id):
-                    vis = self.app_config.get("visible_characters", [])
-                    if c_id in vis:
-                        vis.remove(c_id)
-                        self.save_visible_characters(vis)
+                is_hidden = cid in self.hidden_windows
 
-                # Flat label instead of bulky button
-                btn = tk.Label(row_f, text="✕ HIDE", fg=DIM, bg=BG_PANEL, font=("Consolas", 8, "bold"), cursor="hand2")
-                btn.pack(side="right")
-                btn.bind("<Button-1>", lambda e, c=cid: hide_char(c))
-                btn.bind("<Enter>", lambda e, b=btn: b.config(fg=RED))
-                btn.bind("<Leave>", lambda e, b=btn: b.config(fg=DIM))
+                def show_window(c_id):
+                    # Bring back the withdrawn floating window
+                    top = self.floating_windows.get(c_id)
+                    if top and top.winfo_exists():
+                        top.deiconify()
+                        top.lift()
+                    self.hidden_windows.discard(c_id)
+                    self._save_hidden_windows()
+                    self.rebuild_dashboard()
+
+                def hide_window(c_id):
+                    # Withdraw floating window — stays in fleet, can be shown again
+                    top = self.floating_windows.get(c_id)
+                    if top and top.winfo_exists():
+                        top.withdraw()
+                    self.hidden_windows.add(c_id)
+                    self._save_hidden_windows()
+                    self.rebuild_dashboard()
+
+                if is_hidden:
+                    btn = tk.Label(row_f, text="◉ SHOW", fg=GREEN, bg=BG_PANEL, font=("Consolas", 8, "bold"), cursor="hand2")
+                    btn.pack(side="right")
+                    btn.bind("<Button-1>", lambda e, c=cid: show_window(c))
+                    btn.bind("<Enter>", lambda e, b=btn: b.config(fg=WHITE))
+                    btn.bind("<Leave>", lambda e, b=btn: b.config(fg=GREEN))
+                else:
+                    btn = tk.Label(row_f, text="◉ HIDE", fg=DIM, bg=BG_PANEL, font=("Consolas", 8, "bold"), cursor="hand2")
+                    btn.pack(side="right")
+                    btn.bind("<Button-1>", lambda e, c=cid: hide_window(c))
+                    btn.bind("<Enter>", lambda e, b=btn: b.config(fg=RED))
+                    btn.bind("<Leave>", lambda e, b=btn: b.config(fg=DIM))
 
         # Intentionally removed the geometry snapping so it stays where you resized it!
 
@@ -1067,6 +1121,79 @@ class MiningDashboard:
         if new_state: self.pin_icon.config(fg=CYAN)
         else: self.pin_icon.config(fg=DIM)
 
+    def toggle_rollup(self, event=None):
+        # EVE-style window shade: double-click title bar collapses to just the title bar
+        # Guard: ignore double-clicks on interactive widgets (buttons, icons, grip)
+        if event and isinstance(event.widget, tk.Label) and event.widget.cget("cursor") in ["hand2", "sizing"]:
+            return
+
+        # 500ms cooldown — prevents rapid double-toggle from two quick double-clicks
+        now = time.time()
+        if now - self._last_toggle_time < 0.5:
+            return
+        self._last_toggle_time = now
+
+        if not self.inner_frame:
+            return
+
+        # Content widgets = everything in inner_frame except the top_bar (first child)
+        children = self.inner_frame.winfo_children()
+        if not children:
+            return
+        content_widgets = children[1:]  # skip the top_bar at index 0
+
+        if self._is_rolled_up:
+            # Expand: restore all hidden content widgets using their saved pack options
+            for widget in self._hidden_widgets:
+                info = getattr(widget, "_rollup_pack_info", None)
+                if info:
+                    try:
+                        widget.pack(**info)
+                    except Exception:
+                        widget.pack(fill="x")
+
+            # Restore min/max size constraints
+            self.root.minsize(240, 200)
+            self.root.maxsize(9999, 9999)
+
+            # Restore full height, keep current width and position
+            if self._full_height > 0:
+                w = self.root.winfo_width()
+                x = self.root.winfo_x()
+                y = self.root.winfo_y()
+                self.root.geometry(f"{w}x{self._full_height}+{x}+{y}")
+
+            self._hidden_widgets = []
+            self._is_rolled_up = False
+
+        else:
+            # Collapse: hide all content widgets below the title bar
+            self._full_height = self.root.winfo_height()
+
+            self._hidden_widgets = []
+            for widget in content_widgets:
+                try:
+                    widget._rollup_pack_info = widget.pack_info()
+                    self._hidden_widgets.append(widget)
+                except Exception:
+                    widget._rollup_pack_info = None
+                widget.pack_forget()
+
+            self.root.update_idletasks()
+
+            # Lock size to just the title bar — remove min/max constraints first
+            collapsed_h = 38
+            w = self.root.winfo_width()
+            x = self.root.winfo_x()
+            y = self.root.winfo_y()
+            self.root.minsize(1, 1)
+            self.root.maxsize(9999, 9999)
+            self.root.geometry(f"{w}x{collapsed_h}+{x}+{y}")
+            self.root.minsize(w, collapsed_h)
+            self.root.maxsize(w, collapsed_h)
+
+            self._is_rolled_up = True
+
     def setup_ui(self) -> None:
         border_frame = tk.Frame(self.root, bg=BORDER, padx=1, pady=1)
         border_frame.pack(fill="both", expand=True)
@@ -1076,9 +1203,12 @@ class MiningDashboard:
 
         top_bar = tk.Frame(self.inner_frame, bg=BG, pady=8, padx=10)
         top_bar.pack(fill="x")
+        top_bar.bind("<Double-Button-1>", self.toggle_rollup)
 
         # Shorter title to leave room for resizing
-        tk.Label(top_bar, text="★ MINING ★", fg=CYAN, bg=BG, font=("Consolas", 11, "bold")).pack(side="left")
+        title_lbl = tk.Label(top_bar, text="★ MINING ★", fg=CYAN, bg=BG, font=("Consolas", 11, "bold"))
+        title_lbl.pack(side="left")
+        title_lbl.bind("<Double-Button-1>", self.toggle_rollup)
 
         close_btn = tk.Label(top_bar, text="✕", fg=DIM, bg=BG, font=("Consolas", 14, "bold"), cursor="hand2")
         close_btn.pack(side="right", padx=(5, 0))
