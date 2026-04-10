@@ -145,6 +145,9 @@ THEMES = {
 }
 THEME_NAMES = list(THEMES.keys())
 
+# Window transparency (0.2 – 1.0) — overridden by saved config on startup
+WIN_ALPHA: float = 0.85
+
 # Color palette variables (will be dynamically overridden by theme)
 BG = "#0b0e17"
 BG_PANEL = "#111827"
@@ -809,7 +812,7 @@ class MiningDashboard:
         self.root.attributes("-topmost", True)
         self.root.configure(bg=BORDER)
         self.root.overrideredirect(True)
-        self.root.attributes("-alpha", 0.85)
+        self.root.attributes("-alpha", WIN_ALPHA)
         self.root.resizable(False, False)
 
         self._drag_x = 0
@@ -834,6 +837,8 @@ class MiningDashboard:
         self._glob_cache: List[str] = []
         self._glob_cache_time: float = 0.0
         self._glob_cache_ttl: float = 5.0
+        self._history_cache = None          # (per_char_ores, per_char_m3, combined_m3, days)
+        self._history_cache_time: float = 0.0
     
         self.all_characters = self.discover_all_characters()
         self.characters = self.get_visible_characters()
@@ -1015,7 +1020,7 @@ class MiningDashboard:
         top.configure(bg=BORDER)
         top.overrideredirect(True)
         top.attributes("-topmost", True)
-        top.attributes("-alpha", 0.85)
+        top.attributes("-alpha", WIN_ALPHA)
         self.floating_windows[char_id] = top
         
         top._user_resized = False
@@ -1611,7 +1616,7 @@ class MiningDashboard:
             self.history_window.overrideredirect(True)
             self.history_window.configure(bg=BORDER)
             self.history_window.attributes("-topmost", True)
-            self.history_window.attributes("-alpha", 0.85)
+            self.history_window.attributes("-alpha", WIN_ALPHA)
 
             self._history_drag_x = 0
             self._history_drag_y = 0
@@ -1713,6 +1718,7 @@ class MiningDashboard:
             self.history_button.config(state="normal")
 
     # Lit les logs, calcule les totaux par personnage/minerai et affiche dans le widget texte
+    # Résultats mis en cache 30 s pour éviter de relire tous les fichiers à chaque clic
     def calculate_and_display_history(self, text_widget: tk.Text):
         text_widget.config(state="normal")
         text_widget.delete("1.0", tk.END)
@@ -1727,31 +1733,15 @@ class MiningDashboard:
             days = HISTORY_DAYS
             self.history_days_var.set(str(days))
 
-        threshold = datetime.now() - timedelta(days=days)
-        per_char_ores: Dict[str, Dict[str, float]] = {}
-        per_char_m3: Dict[str, float] = {}
-        combined_m3 = 0.0
-
-        all_files = self._get_all_log_files()
-        for log_file in all_files:
-            if os.path.getmtime(log_file) > threshold.timestamp():
-                char_id = self._get_char_id_from_file(log_file)
-                if not char_id or char_id not in self.all_characters: continue
-                if char_id not in per_char_ores:
-                    per_char_ores[char_id] = {}
-                    per_char_m3[char_id] = 0.0
-                try:
-                    with open(log_file, "r", encoding="utf-8-sig", errors="ignore") as f:
-                        for line in f:
-                            match = REGULAR_MINE_PATTERN.search(line) or CRIT_MINE_PATTERN.search(line)
-                            if match:
-                                units = float(match.group('amount').replace(",", ""))
-                                volume, ore_name = self.get_ore_volume(match.group('ore_type'))
-                                total_volume = units * volume
-                                per_char_ores[char_id][ore_name] = per_char_ores[char_id].get(ore_name, 0) + total_volume
-                                per_char_m3[char_id] = per_char_m3.get(char_id, 0) + total_volume
-                                combined_m3 += total_volume
-                except Exception: continue
+        now = time.time()
+        if (self._history_cache is not None
+                and now - self._history_cache_time < 30
+                and self._history_cache[3] == days):
+            per_char_ores, per_char_m3, combined_m3, days = self._history_cache
+        else:
+            per_char_ores, per_char_m3, combined_m3, days = self._gather_history_data(days)
+            self._history_cache = (per_char_ores, per_char_m3, combined_m3, days)
+            self._history_cache_time = now
 
         w = 38
         result = ""
@@ -2325,7 +2315,7 @@ class MiningDashboard:
 
     # Restaure les paramètres sauvegardés (thème, transparence, topmost) depuis la config
     def _apply_saved_app_settings(self):
-        global DOCS, CRIT_SOUND_FILE, UPDATE_INTERVAL_MS, HISTORY_DAYS, CRITICAL_HIT_KEYWORD, PLAY_CRIT_SOUND
+        global DOCS, CRIT_SOUND_FILE, UPDATE_INTERVAL_MS, HISTORY_DAYS, CRITICAL_HIT_KEYWORD, PLAY_CRIT_SOUND, WIN_ALPHA
         app_settings = self.app_config.get("app_settings", {})
         if not app_settings: return
         if "docs_path" in app_settings: DOCS = app_settings["docs_path"]
@@ -2334,6 +2324,31 @@ class MiningDashboard:
         if "history_days" in app_settings: HISTORY_DAYS = max(1, int(app_settings["history_days"]))
         if "crit_keyword" in app_settings: CRITICAL_HIT_KEYWORD = app_settings["crit_keyword"]
         if "play_crit_sound" in app_settings: PLAY_CRIT_SOUND = app_settings["play_crit_sound"]
+        if "win_alpha" in app_settings:
+            WIN_ALPHA = max(0.2, min(1.0, float(app_settings["win_alpha"])))
+            self._apply_alpha(WIN_ALPHA)
+
+    # Applique la transparence à toutes les fenêtres ouvertes (root, flottantes, historique, config)
+    def _apply_alpha(self, value: float) -> None:
+        v = max(0.2, min(1.0, float(value)))
+        try: self.root.attributes("-alpha", v)
+        except Exception: pass
+        for top in getattr(self, "floating_windows", {}).values():
+            try:
+                if top.winfo_exists(): top.attributes("-alpha", v)
+            except Exception: pass
+        hw = getattr(self, "history_window", None)
+        if hw and hw.winfo_exists():
+            try: hw.attributes("-alpha", v)
+            except Exception: pass
+        for dlg in getattr(self, "ship_config_dialogs", {}).values():
+            try:
+                if dlg.winfo_exists(): dlg.attributes("-alpha", v)
+            except Exception: pass
+        cd = getattr(self, "config_dialog", None)
+        if cd and cd.winfo_exists():
+            try: cd.attributes("-alpha", v)
+            except Exception: pass
 
     # Charge la configuration JSON depuis le disque (retourne un dict vide si absent)
     def load_config(self) -> Dict:
@@ -2414,13 +2429,9 @@ class MiningDashboard:
         last_mined_ore = "Unknown"
 
         for line in data.splitlines():
-            if "(notify)" in line.lower():
-                should_pause = False
-                for keyword in AUTO_PAUSE_KEYWORDS:
-                    if keyword.lower() in line.lower():
-                        should_pause = True
-                        break
-                if should_pause:
+            line_lower = line.lower()   # computed once, reused for notify check
+            if "(notify)" in line_lower:
+                if any(kw.lower() in line_lower for kw in AUTO_PAUSE_KEYWORDS):
                     tracker.session_elapsed_offset += time.time() - tracker.session_start_time
                     tracker.session_active = False
                     if tracker.char_id in self.char_widgets:
@@ -2709,7 +2720,7 @@ class MiningDashboard:
         dialog.configure(bg=BORDER)
         dialog.overrideredirect(True)
         dialog.wm_attributes("-topmost", 1)
-        dialog.attributes("-alpha", 0.85)
+        dialog.attributes("-alpha", WIN_ALPHA)
         dialog.resizable(False, False)
         self.ship_config_dialogs[char_id] = dialog
 
@@ -3187,6 +3198,8 @@ class MiningDashboard:
         self.save_ship_configs()
         self.update_profile_label(char_id)
         self.update_ship_indicator(char_id)
+        if char_id in self.char_widgets:
+            self._update_rate_stats(char_id, tracker, self.char_widgets[char_id])
 
     # Crée un nouveau profil directement depuis l'interface principale (sans ouvrir ship config)
     def create_profile_from_main(self, char_id: str):
@@ -3249,7 +3262,7 @@ class MiningDashboard:
         dialog.configure(bg=BORDER)
         dialog.overrideredirect(True)
         dialog.wm_attributes("-topmost", 1)
-        dialog.attributes("-alpha", 0.85)
+        dialog.attributes("-alpha", WIN_ALPHA)
         dialog.resizable(False, False)
         self.config_dialog = dialog
 
@@ -3411,30 +3424,47 @@ class MiningDashboard:
         interval_var = make_field(fields_frame, 5, "Update Interval (ms):", app_settings.get("update_interval_ms", UPDATE_INTERVAL_MS), width=10, note_text="min: 250")
         history_var = make_field(fields_frame, 6, "Default History Days:", app_settings.get("history_days", HISTORY_DAYS), width=10)
 
+        # Transparency slider — live, affects all open windows immediately
+        tk.Label(fields_frame, text="Window Transparency:", fg=WHITE, bg=BG_PANEL, font=("Consolas", 9), anchor="w").grid(row=7, column=0, sticky="w", pady=4, padx=(0, 10))
+        alpha_frame = tk.Frame(fields_frame, bg=BG_PANEL)
+        alpha_frame.grid(row=7, column=1, sticky="w", pady=4)
+        alpha_var = tk.DoubleVar(value=app_settings.get("win_alpha", WIN_ALPHA))
+        alpha_pct_var = tk.StringVar(value=f"{int(alpha_var.get() * 100)}%")
+        alpha_pct_label = tk.Label(alpha_frame, textvariable=alpha_pct_var, fg=CYAN, bg=BG_PANEL, font=("Consolas", 9), width=4, anchor="w")
+        alpha_pct_label.pack(side="right", padx=(6, 0))
+        def on_alpha_change(val):
+            v = float(val)
+            alpha_pct_var.set(f"{int(v * 100)}%")
+            self._apply_alpha(v)
+        tk.Scale(alpha_frame, variable=alpha_var, from_=0.2, to=1.0, resolution=0.05,
+                 orient="horizontal", length=160, command=on_alpha_change,
+                 bg=BG_PANEL, fg=WHITE, troughcolor=BG, highlightthickness=0,
+                 activebackground=CYAN, sliderrelief="flat", showvalue=False).pack(side="left")
+
         # Sound Toggle Checkbox
         crit_sound_var = tk.BooleanVar(value=app_settings.get("play_crit_sound", PLAY_CRIT_SOUND))
         crit_cb = tk.Checkbutton(fields_frame, text="Play audio on Critical Hit", variable=crit_sound_var, bg=BG_PANEL, fg=WHITE, activebackground=BG_PANEL, activeforeground=WHITE, selectcolor=BG, highlightthickness=0, font=("Consolas", 9))
-        crit_cb.grid(row=7, column=0, columnspan=3, sticky="w", pady=(4, 0), padx=8)
+        crit_cb.grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 0), padx=8)
 
-        tk.Label(fields_frame, text="-" * 55, fg=BORDER, bg=BG_PANEL, font=("Consolas", 8)).grid(row=8, column=0, columnspan=3, pady=8)
-        tk.Label(fields_frame, text="◆ FLEET", fg=CYAN, bg=BG_PANEL, font=("Consolas", 9, "bold")).grid(row=8, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        tk.Label(fields_frame, text="-" * 55, fg=BORDER, bg=BG_PANEL, font=("Consolas", 8)).grid(row=9, column=0, columnspan=3, pady=8)
+        tk.Label(fields_frame, text="◆ FLEET", fg=CYAN, bg=BG_PANEL, font=("Consolas", 9, "bold")).grid(row=9, column=0, columnspan=3, sticky="w", pady=(0, 8))
         fleet_cfg = self.app_config.get("fleet", {})
-        webhook_var = make_field(fields_frame, 9, "Webhook URL:", fleet_cfg.get("webhook_url", ""), width=40)
+        webhook_var = make_field(fields_frame, 10, "Webhook URL:", fleet_cfg.get("webhook_url", ""), width=40)
 
-        tk.Label(fields_frame, text="-" * 55, fg=BORDER, bg=BG_PANEL, font=("Consolas", 8)).grid(row=10, column=0, columnspan=3, pady=8)
-        tk.Label(fields_frame, text="◆ ORE DATABASE (SDE)", fg=CYAN, bg=BG_PANEL, font=("Consolas", 9, "bold")).grid(row=11, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        tk.Label(fields_frame, text="-" * 55, fg=BORDER, bg=BG_PANEL, font=("Consolas", 8)).grid(row=11, column=0, columnspan=3, pady=8)
+        tk.Label(fields_frame, text="◆ ORE DATABASE (SDE)", fg=CYAN, bg=BG_PANEL, font=("Consolas", 9, "bold")).grid(row=12, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
         sde_info_text = f"SDE: {SDE_INFO['version']}  |  {SDE_INFO['ore_count']} ores  |  {SDE_INFO['updated_at']}"
         sde_info_var = tk.StringVar(value=sde_info_text)
         sde_info_label = tk.Label(fields_frame, textvariable=sde_info_var, fg=DIM, bg=BG_PANEL, font=("Consolas", 8), anchor="w")
-        sde_info_label.grid(row=12, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        sde_info_label.grid(row=13, column=0, columnspan=3, sticky="w", pady=(0, 6))
 
         sde_status_var = tk.StringVar(value="")
         sde_status_label = tk.Label(fields_frame, textvariable=sde_status_var, fg=GOLD, bg=BG_PANEL, font=("Consolas", 8), anchor="w")
-        sde_status_label.grid(row=13, column=0, columnspan=3, sticky="w")
+        sde_status_label.grid(row=14, column=0, columnspan=3, sticky="w")
 
         sde_bar_frame = tk.Frame(fields_frame, bg=BG_PANEL)
-        sde_bar_frame.grid(row=14, column=0, columnspan=3, sticky="ew", pady=(4, 2))
+        sde_bar_frame.grid(row=15, column=0, columnspan=3, sticky="ew", pady=(4, 2))
         sde_bar_border = tk.Frame(sde_bar_frame, bg=CYAN, padx=1, pady=1)
         sde_bar_border.pack(fill="x")
         sde_bar_canvas = tk.Canvas(sde_bar_border, height=20, bg="#0a1520", highlightthickness=0)
@@ -3480,6 +3510,7 @@ class MiningDashboard:
                         draw_neon_bar(sde_bar_canvas, 1.0)
                         sde_bar_pct_label.config(text="100% ─ Complete!", fg=GREEN)
                         update_btn.config(state="normal", text="↻ UPDATE ORE DATA")
+                        self._history_cache = None  # ore volumes changed, bust stale m³ totals
 
                     try: dialog.after(0, on_success)
                     except Exception: pass
@@ -3503,13 +3534,45 @@ class MiningDashboard:
             sde_bar_pct_label.config(text=f"{pct_display}%", fg=CYAN)
 
         update_btn = tk.Button(fields_frame, text="↻ UPDATE ORE DATA", command=do_sde_update, bg=BG, fg=CYAN, font=("Consolas", 9, "bold"), relief="flat", cursor="hand2", width=20)
-        update_btn.grid(row=15, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        update_btn.grid(row=16, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         btn_frame = tk.Frame(main_frame, bg=BG_PANEL)
         btn_frame.pack(pady=(15, 0))
 
+        # Dynamic theme preview — apply immediately on selection, config reopens in new theme
+        def on_theme_preview(event=None):
+            new_theme = theme_var.get()
+            if new_theme == self.app_theme: return
+            try: interval_safe = max(250, int(interval_var.get()))
+            except: interval_safe = UPDATE_INTERVAL_MS
+            try: history_safe = max(1, int(history_var.get()))
+            except: history_safe = HISTORY_DAYS
+            self.app_config["app_settings"] = {
+                "docs_path": docs_var.get().strip(), "crit_sound_file": CRIT_SOUND_FILE,
+                "update_interval_ms": interval_safe, "history_days": history_safe,
+                "max_modules": MAX_MODULES, "play_crit_sound": crit_sound_var.get(),
+                "win_alpha": float(alpha_var.get()),
+            }
+            fleet_cfg_preview = self.app_config.get("fleet", {})
+            fleet_cfg_preview["webhook_url"] = webhook_var.get().strip()
+            self.app_config["fleet"] = fleet_cfg_preview
+            self.app_config["theme"] = new_theme
+            self.app_theme = new_theme
+            apply_theme_colors(new_theme)
+            try:
+                cx, cy = dialog.winfo_x(), dialog.winfo_y()
+                self.app_config[config_key] = f"+{cx}+{cy}"
+            except Exception: pass
+            self.config_dialog = None
+            self._enable_config_icon()
+            dialog.destroy()
+            self.rebuild_all_ui()
+            self.root.after(80, self.show_config_dialog)
+
+        theme_cb.bind("<<ComboboxSelected>>", on_theme_preview)
+
         def save_and_close():
-            global DOCS, UPDATE_INTERVAL_MS, HISTORY_DAYS, PLAY_CRIT_SOUND
+            global DOCS, UPDATE_INTERVAL_MS, HISTORY_DAYS, PLAY_CRIT_SOUND, WIN_ALPHA
             try:
                 new_interval = int(interval_var.get())
                 if new_interval < 250: new_interval = 250
@@ -3530,11 +3593,14 @@ class MiningDashboard:
             UPDATE_INTERVAL_MS = new_interval
             HISTORY_DAYS = new_history
             PLAY_CRIT_SOUND = crit_sound_var.get()
+            WIN_ALPHA = max(0.2, min(1.0, float(alpha_var.get())))
+            self._apply_alpha(WIN_ALPHA)
 
             self.app_config["app_settings"] = {
                 "docs_path": DOCS, "crit_sound_file": CRIT_SOUND_FILE,
                 "update_interval_ms": UPDATE_INTERVAL_MS, "history_days": HISTORY_DAYS,
-                "max_modules": MAX_MODULES, "play_crit_sound": PLAY_CRIT_SOUND
+                "max_modules": MAX_MODULES, "play_crit_sound": PLAY_CRIT_SOUND,
+                "win_alpha": WIN_ALPHA,
             }
 
             self.app_config["theme"] = selected_theme
