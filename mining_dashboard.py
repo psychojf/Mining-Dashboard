@@ -21,6 +21,10 @@ import time
 # winsound is built-in on Windows - no external dependency needed
 import winsound
 
+# Watchdog for event-driven gamelog monitoring (replaces 500ms polling loop)
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
 # Conditional imports
 try:
     from plyer import notification
@@ -62,6 +66,7 @@ AUTO_PAUSE_KEYWORDS = [
 # ---------------------------------------------------------------------------
 # THEME ENGINE (Imported from Ratting Dashboard)
 # ---------------------------------------------------------------------------
+# Éclaircit une couleur hex par un montant fixe
 def _lighten(hx, amt):
     h = hx.lstrip('#')
     r = min(255, int(h[0:2], 16) + amt)
@@ -69,6 +74,7 @@ def _lighten(hx, amt):
     b = min(255, int(h[4:6], 16) + amt)
     return f"#{r:02x}{g:02x}{b:02x}"
 
+# Assombrit une couleur hex par un facteur multiplicatif
 def _dim(hx, factor=0.6):
     h = hx.lstrip('#')
     r = int(int(h[0:2], 16) * factor)
@@ -76,6 +82,7 @@ def _dim(hx, factor=0.6):
     b = int(int(h[4:6], 16) * factor)
     return f"#{r:02x}{g:02x}{b:02x}"
 
+# Mélange deux couleurs hex selon un ratio t (0=h1, 1=h2)
 def _blend(h1, h2, t=0.5):
     a = h1.lstrip('#'); b = h2.lstrip('#')
     r = int(int(a[0:2], 16) * (1 - t) + int(b[0:2], 16) * t)
@@ -83,6 +90,7 @@ def _blend(h1, h2, t=0.5):
     bl = int(int(a[4:6], 16) * (1 - t) + int(b[4:6], 16) * t)
     return f"#{min(255,r):02x}{min(255,g):02x}{min(255,bl):02x}"
 
+# Génère un dictionnaire de thème complet à partir d'une couleur de base et d'accent
 def _gen_theme(base, accent):
     return {
         "BG": base, "BG_P": _lighten(base, 10), "BG_H": _lighten(base, 18),
@@ -148,6 +156,7 @@ GOLD = "#ffd700"
 DIM = "#5a7085"
 WHITE = "#ffffff"
 
+# Applique les couleurs du thème choisi aux variables globales de couleur
 def apply_theme_colors(name):
     global BG, BG_PANEL, BORDER, CYAN, RED, GREEN, GOLD, DIM, WHITE
     t = THEMES.get(name, THEMES["EVE Online (Default)"])
@@ -171,6 +180,7 @@ CHAR_ACCENTS = ["#3dd8e0", "#ff9f43", "#a29bfe", "#e056fd", "#26de81", "#fc5c65"
 # ---------------------------------------------------------------------------
 # NEON PROGRESS BAR DRAWING HELPERS
 # ---------------------------------------------------------------------------
+# Dessine une barre de progression style néon avec lueur et segments sur un canvas Tkinter
 def draw_neon_bar(canvas, pct, bar_color=None, glow=True, segments=True):
     bar_color = bar_color or CYAN
     canvas.delete("all")
@@ -205,7 +215,7 @@ def draw_neon_bar(canvas, pct, bar_color=None, glow=True, segments=True):
 
 # ---------------------------------------------------------------------------
 # ORE / ICE / GAS DATA  (SDE-aware, auto-updatable)
-# Source: EVE Online SDE build 3215400 (Feb 19, 2026)
+# Source: EVE Online SDE build 3294658 (Apr 10, 2026)
 # ---------------------------------------------------------------------------
 ORE_DATA_CACHE_FILE = "ore_data_cache.json"
 SDE_LATEST_URL = "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip"
@@ -217,87 +227,160 @@ SDE_SKIP_GROUPS = {
     "AIR Ore Asteroid Resources"
 }
 
+# Source: EVE Online SDE build 3294658 (Apr 10, 2026)
+# To update before building the exe, run ore_data.py and copy its _SEED_VOLUMES /
+# _build_seed_ratios() output into these two dicts.
 _DEFAULT_ORE_VOLUMES: Dict[str, float] = {
-    "Arkonor": 16.0, "Arkonor II-Grade": 16.0, "Arkonor III-Grade": 16.0, "Arkonor IV-Grade": 16.0, "Polygypsum": 16.0,
-    "Bezdnacine": 16.0, "Bezdnacine II-Grade": 16.0, "Bezdnacine III-Grade": 16.0,
-    "Bistot": 16.0, "Bistot II-Grade": 16.0, "Bistot III-Grade": 16.0, "Bistot IV-Grade": 16.0,
-    "Cobaltite": 10.0, "Copious Cobaltite": 10.0, "Twinkling Cobaltite": 10.0,
-    "Euxenite": 10.0, "Copious Euxenite": 10.0, "Twinkling Euxenite": 10.0,
-    "Scheelite": 10.0, "Copious Scheelite": 10.0, "Twinkling Scheelite": 10.0,
-    "Titanite": 10.0, "Copious Titanite": 10.0, "Twinkling Titanite": 10.0,
-    "Crokite": 16.0, "Crokite II-Grade": 16.0, "Crokite III-Grade": 16.0, "Crokite IV-Grade": 16.0, "Geodite": 16.0,
-    "Dark Ochre": 8.0, "Dark Ochre II-Grade": 8.0, "Dark Ochre III-Grade": 8.0, "Dark Ochre IV-Grade": 8.0, "Oeryl": 8.0,
-    "Ducinium": 16.0, "Ducinium II-Grade": 16.0, "Ducinium III-Grade": 16.0, "Ducinium IV-Grade": 16.0,
-    "Eifyrium": 16.0, "Eifyrium II-Grade": 16.0, "Eifyrium III-Grade": 16.0, "Eifyrium IV-Grade": 16.0,
-    "Xenotime": 10.0, "Bountiful Xenotime": 10.0, "Shining Xenotime": 10.0,
-    "Monazite": 10.0, "Bountiful Monazite": 10.0, "Shining Monazite": 10.0,
-    "Loparite": 10.0, "Bountiful Loparite": 10.0, "Shining Loparite": 10.0,
-    "Ytterbite": 10.0, "Bountiful Ytterbite": 10.0, "Shining Ytterbite": 10.0,
-    "Gneiss": 5.0, "Gneiss II-Grade": 5.0, "Gneiss III-Grade": 5.0, "Gneiss IV-Grade": 5.0, "Green Arisite": 5.0,
+    # 0.1 m³
+    "Banidine": 0.1, "Mordunium": 0.1, "Mordunium II-Grade": 0.1, "Mordunium III-Grade": 0.1,
+    "Mordunium IV-Grade": 0.1, "Veldspar": 0.1, "Veldspar 0-Grade": 0.1, "Veldspar II-Grade": 0.1,
+    "Veldspar III-Grade": 0.1, "Veldspar IV-Grade": 0.1,
+    # 0.15 m³
+    "Scordite": 0.15, "Scordite 0-Grade": 0.15, "Scordite II-Grade": 0.15, "Scordite III-Grade": 0.15,
+    "Scordite IV-Grade": 0.15,
+    # 0.3 m³
+    "Augumene": 0.3, "Pyroxeres": 0.3, "Pyroxeres II-Grade": 0.3, "Pyroxeres III-Grade": 0.3,
+    "Pyroxeres IV-Grade": 0.3,
+    # 0.35 m³
+    "Plagioclase": 0.35, "Plagioclase II-Grade": 0.35, "Plagioclase III-Grade": 0.35, "Plagioclase IV-Grade": 0.35,
+    # 0.5 m³
+    "Nesosilicate Rakovene": 0.5,
+    # 0.6 m³
+    "Mercium": 0.6, "Omber": 0.6, "Omber II-Grade": 0.6, "Omber III-Grade": 0.6,
+    "Omber IV-Grade": 0.6, "Tyranite": 0.6, "Ytirium": 0.6, "Ytirium II-Grade": 0.6,
+    "Ytirium III-Grade": 0.6, "Ytirium IV-Grade": 0.6,
+    # 0.8 m³
     "Griemeer": 0.8, "Griemeer II-Grade": 0.8, "Griemeer III-Grade": 0.8, "Griemeer IV-Grade": 0.8,
-    "Amber Cytoserocin": 10.0, "Azure Cytoserocin": 10.0,
-    "Celadon Cytoserocin": 10.0, "Chartreuse Cytoserocin": 10.0,
-    "Gamboge Cytoserocin": 10.0, "Golden Cytoserocin": 10.0,
-    "Lime Cytoserocin": 10.0, "Malachite Cytoserocin": 10.0,
-    "Vermillion Cytoserocin": 10.0, "Viridian Cytoserocin": 10.0,
-    "Amber Mykoserocin": 10.0, "Azure Mykoserocin": 10.0,
-    "Celadon Mykoserocin": 10.0, "Golden Mykoserocin": 10.0,
-    "Lime Mykoserocin": 10.0, "Malachite Mykoserocin": 10.0,
-    "Vermillion Mykoserocin": 10.0, "Viridian Mykoserocin": 10.0,
-    "Fullerite-C28": 2.0, "Fullerite-C32": 5.0, "Fullerite-C50": 1.0,
-    "Fullerite-C60": 1.0, "Fullerite-C70": 1.0, "Fullerite-C72": 2.0,
-    "Fullerite-C84": 2.0, "Fullerite-C320": 5.0, "Fullerite-C540": 10.0,
-    "Hiemal Tricarboxyl Vapor": 10.0,
+    # 1.0 m³
+    "Fullerite-C50": 1.0, "Fullerite-C60": 1.0, "Fullerite-C70": 1.0,
+    # 1.2 m³
+    "Kernite": 1.2, "Kernite II-Grade": 1.2, "Kernite III-Grade": 1.2, "Kernite IV-Grade": 1.2,
+    "Kylixium": 1.2, "Kylixium II-Grade": 1.2, "Kylixium III-Grade": 1.2, "Kylixium IV-Grade": 1.2,
+    "Lyavite": 1.2,
+    # 2.0 m³
+    "Fullerite-C28": 2.0, "Fullerite-C72": 2.0, "Fullerite-C84": 2.0, "Jaspet": 2.0,
+    "Jaspet II-Grade": 2.0, "Jaspet III-Grade": 2.0, "Jaspet IV-Grade": 2.0, "Pithix": 2.0,
+    # 3.0 m³
     "Hedbergite": 3.0, "Hedbergite II-Grade": 3.0, "Hedbergite III-Grade": 3.0, "Hedbergite IV-Grade": 3.0,
     "Hemorphite": 3.0, "Hemorphite II-Grade": 3.0, "Hemorphite III-Grade": 3.0, "Hemorphite IV-Grade": 3.0,
-    "Hezorime": 5.0, "Hezorime II-Grade": 5.0, "Hezorime III-Grade": 5.0, "Hezorime IV-Grade": 5.0,
-    "Blue Ice": 1000.0, "Blue Ice IV-Grade": 1000.0, "Clear Icicle": 1000.0, "Clear Icicle IV-Grade": 1000.0,
-    "Glacial Mass": 1000.0, "Glacial Mass IV-Grade": 1000.0, "White Glaze": 1000.0, "White Glaze IV-Grade": 1000.0,
-    "Dark Glitter": 1000.0, "Gelidus": 1000.0, "Glare Crust": 1000.0, "Krystallos": 1000.0,
-    "Azure Ice": 1000.0, "Crystalline Icicle": 1000.0,
-    "Jaspet": 2.0, "Jaspet II-Grade": 2.0, "Jaspet III-Grade": 2.0, "Jaspet IV-Grade": 2.0, "Pithix": 2.0,
-    "Kernite": 1.2, "Kernite II-Grade": 1.2, "Kernite III-Grade": 1.2, "Kernite IV-Grade": 1.2, "Lyavite": 1.2,
-    "Kylixium": 1.2, "Kylixium II-Grade": 1.2, "Kylixium III-Grade": 1.2, "Kylixium IV-Grade": 1.2,
-    "Mercoxit": 40.0, "Mercoxit II-Grade": 40.0, "Mercoxit III-Grade": 40.0, "Zuthrine": 40.0,
-    "Mordunium": 0.1, "Mordunium II-Grade": 0.1, "Mordunium III-Grade": 0.1, "Mordunium IV-Grade": 0.1,
-    "Admixti Mutanite": 4.0, "Amperum Mutanite": 4.0, "Conflagrati Mutanite": 4.0, "Peregrinus Mutanite": 4.0,
+    # 4.0 m³
+    "Admixti Mutanite": 4.0, "Amperum Mutanite": 4.0, "Conflagrati Mutanite": 4.0, "Nocxite": 4.0,
+    "Nocxite II-Grade": 4.0, "Nocxite III-Grade": 4.0, "Nocxite IV-Grade": 4.0, "Peregrinus Mutanite": 4.0,
     "Solis Mutanite": 4.0, "Tenebraet Mutanite": 4.0,
-    "Nocxite": 4.0, "Nocxite II-Grade": 4.0, "Nocxite III-Grade": 4.0, "Nocxite IV-Grade": 4.0,
-    "Omber": 0.6, "Omber II-Grade": 0.6, "Omber III-Grade": 0.6, "Omber IV-Grade": 0.6, "Mercium": 0.6,
-    "Plagioclase": 0.35, "Plagioclase II-Grade": 0.35, "Plagioclase III-Grade": 0.35, "Plagioclase IV-Grade": 0.35,
-    "Pyroxeres": 0.3, "Pyroxeres II-Grade": 0.3, "Pyroxeres III-Grade": 0.3, "Pyroxeres IV-Grade": 0.3, "Augumene": 0.3,
-    "Rakovene": 16.0, "Rakovene II-Grade": 16.0, "Rakovene III-Grade": 16.0, "Nesosilicate Rakovene": 0.5,
-    "Carnotite": 10.0, "Glowing Carnotite": 10.0, "Replete Carnotite": 10.0,
-    "Cinnabar": 10.0, "Glowing Cinnabar": 10.0, "Replete Cinnabar": 10.0,
-    "Pollucite": 10.0, "Glowing Pollucite": 10.0, "Replete Pollucite": 10.0,
-    "Zircon": 10.0, "Glowing Zircon": 10.0, "Replete Zircon": 10.0,
-    "Scordite": 0.15, "Scordite II-Grade": 0.15, "Scordite III-Grade": 0.15, "Scordite IV-Grade": 0.15,
+    # 5.0 m³
+    "Fullerite-C32": 5.0, "Fullerite-C320": 5.0, "Gneiss": 5.0, "Gneiss II-Grade": 5.0,
+    "Gneiss III-Grade": 5.0, "Gneiss IV-Grade": 5.0, "Green Arisite": 5.0, "Hezorime": 5.0,
+    "Hezorime II-Grade": 5.0, "Hezorime III-Grade": 5.0, "Hezorime IV-Grade": 5.0, "Ueganite": 5.0,
+    "Ueganite II-Grade": 5.0, "Ueganite III-Grade": 5.0, "Ueganite IV-Grade": 5.0,
+    # 8.0 m³
+    "Dark Ochre": 8.0, "Dark Ochre II-Grade": 8.0, "Dark Ochre III-Grade": 8.0, "Dark Ochre IV-Grade": 8.0,
+    "Oeryl": 8.0,
+    # 10.0 m³
+    "Amber Cytoserocin": 10.0, "Amber Mykoserocin": 10.0, "Azure Cytoserocin": 10.0, "Azure Mykoserocin": 10.0,
+    "Bitumens": 10.0, "Bountiful Loparite": 10.0, "Bountiful Monazite": 10.0, "Bountiful Xenotime": 10.0,
+    "Bountiful Ytterbite": 10.0, "Brimful Bitumens": 10.0, "Brimful Coesite": 10.0, "Brimful Sylvite": 10.0,
+    "Brimful Zeolites": 10.0, "Carnotite": 10.0, "Celadon Cytoserocin": 10.0, "Celadon Mykoserocin": 10.0,
+    "Chartreuse Cytoserocin": 10.0, "Chromite": 10.0, "Cinnabar": 10.0, "Cobaltite": 10.0,
+    "Coesite": 10.0, "Copious Cobaltite": 10.0, "Copious Euxenite": 10.0, "Copious Scheelite": 10.0,
+    "Copious Titanite": 10.0, "Euxenite": 10.0, "Fullerite-C540": 10.0, "Gamboge Cytoserocin": 10.0,
+    "Glistening Bitumens": 10.0, "Glistening Coesite": 10.0, "Glistening Sylvite": 10.0, "Glistening Zeolites": 10.0,
+    "Glowing Carnotite": 10.0, "Glowing Cinnabar": 10.0, "Glowing Pollucite": 10.0, "Glowing Zircon": 10.0,
+    "Golden Cytoserocin": 10.0, "Golden Mykoserocin": 10.0, "Hiemal Tricarboxyl Vapor": 10.0, "Lavish Chromite": 10.0,
+    "Lavish Otavite": 10.0, "Lavish Sperrylite": 10.0, "Lavish Vanadinite": 10.0, "Lime Cytoserocin": 10.0,
+    "Lime Mykoserocin": 10.0, "Loparite": 10.0, "Malachite Cytoserocin": 10.0, "Malachite Mykoserocin": 10.0,
+    "Monazite": 10.0, "Otavite": 10.0, "Pollucite": 10.0, "Replete Carnotite": 10.0,
+    "Replete Cinnabar": 10.0, "Replete Pollucite": 10.0, "Replete Zircon": 10.0, "Scheelite": 10.0,
+    "Shimmering Chromite": 10.0, "Shimmering Otavite": 10.0, "Shimmering Sperrylite": 10.0, "Shimmering Vanadinite": 10.0,
+    "Shining Loparite": 10.0, "Shining Monazite": 10.0, "Shining Xenotime": 10.0, "Shining Ytterbite": 10.0,
+    "Sperrylite": 10.0, "Sylvite": 10.0, "Titanite": 10.0, "Twinkling Cobaltite": 10.0,
+    "Twinkling Euxenite": 10.0, "Twinkling Scheelite": 10.0, "Twinkling Titanite": 10.0, "Vanadinite": 10.0,
+    "Vermillion Cytoserocin": 10.0, "Vermillion Mykoserocin": 10.0, "Viridian Cytoserocin": 10.0, "Viridian Mykoserocin": 10.0,
+    "Xenotime": 10.0, "Ytterbite": 10.0, "Zeolites": 10.0, "Zircon": 10.0,
+    # 16.0 m³
+    "Arkonor": 16.0, "Arkonor II-Grade": 16.0, "Arkonor III-Grade": 16.0, "Arkonor IV-Grade": 16.0,
+    "Bezdnacine": 16.0, "Bezdnacine II-Grade": 16.0, "Bezdnacine III-Grade": 16.0, "Bistot": 16.0,
+    "Bistot II-Grade": 16.0, "Bistot III-Grade": 16.0, "Bistot IV-Grade": 16.0, "Crokite": 16.0,
+    "Crokite II-Grade": 16.0, "Crokite III-Grade": 16.0, "Crokite IV-Grade": 16.0, "Ducinium": 16.0,
+    "Ducinium II-Grade": 16.0, "Ducinium III-Grade": 16.0, "Ducinium IV-Grade": 16.0, "Eifyrium": 16.0,
+    "Eifyrium II-Grade": 16.0, "Eifyrium III-Grade": 16.0, "Eifyrium IV-Grade": 16.0, "Geodite": 16.0,
+    "Polygypsum": 16.0, "Rakovene": 16.0, "Rakovene II-Grade": 16.0, "Rakovene III-Grade": 16.0,
     "Spodumain": 16.0, "Spodumain II-Grade": 16.0, "Spodumain III-Grade": 16.0, "Spodumain IV-Grade": 16.0,
     "Talassonite": 16.0, "Talassonite II-Grade": 16.0, "Talassonite III-Grade": 16.0,
-    "Tyranite": 0.6,
-    "Zeolites": 10.0, "Brimful Zeolites": 10.0, "Glistening Zeolites": 10.0,
-    "Sylvite": 10.0, "Brimful Sylvite": 10.0, "Glistening Sylvite": 10.0,
-    "Bitumens": 10.0, "Brimful Bitumens": 10.0, "Glistening Bitumens": 10.0,
-    "Coesite": 10.0, "Brimful Coesite": 10.0, "Glistening Coesite": 10.0,
-    "Ueganite": 5.0, "Ueganite II-Grade": 5.0, "Ueganite III-Grade": 5.0, "Ueganite IV-Grade": 5.0,
-    "Chromite": 10.0, "Lavish Chromite": 10.0, "Shimmering Chromite": 10.0,
-    "Otavite": 10.0, "Lavish Otavite": 10.0, "Shimmering Otavite": 10.0,
-    "Sperrylite": 10.0, "Lavish Sperrylite": 10.0, "Shimmering Sperrylite": 10.0,
-    "Vanadinite": 10.0, "Lavish Vanadinite": 10.0, "Shimmering Vanadinite": 10.0,
-    "Veldspar": 0.1, "Veldspar II-Grade": 0.1, "Veldspar III-Grade": 0.1, "Veldspar IV-Grade": 0.1, "Banidine": 0.1,
-    "Ytirium": 0.6, "Ytirium II-Grade": 0.6, "Ytirium III-Grade": 0.6, "Ytirium IV-Grade": 0.6,
+    # 40.0 m³
+    "Mercoxit": 40.0, "Mercoxit II-Grade": 40.0, "Mercoxit III-Grade": 40.0, "Zuthrine": 40.0,
+    # 1000.0 m³
+    "Azure Ice": 1000.0, "Blue Ice": 1000.0, "Blue Ice IV-Grade": 1000.0, "Clear Icicle": 1000.0,
+    "Clear Icicle IV-Grade": 1000.0, "Crystalline Icicle": 1000.0, "Dark Glitter": 1000.0, "Gelidus": 1000.0,
+    "Glacial Mass": 1000.0, "Glacial Mass IV-Grade": 1000.0, "Glare Crust": 1000.0, "Krystallos": 1000.0,
+    "White Glaze": 1000.0, "White Glaze IV-Grade": 1000.0,
 }
 
-_DEFAULT_COMPRESSION_RATIOS: Dict[str, int] = {}
-for _ore_name in _DEFAULT_ORE_VOLUMES: _DEFAULT_COMPRESSION_RATIOS[_ore_name] = 100
-for _n in ["Polygypsum", "Geodite", "Oeryl", "Green Arisite", "Pithix", "Lyavite", "Zuthrine", "Mercium", "Augumene", "Banidine", "Nesosilicate Rakovene", "Tyranite", "Admixti Mutanite", "Amperum Mutanite", "Conflagrati Mutanite", "Peregrinus Mutanite", "Solis Mutanite", "Tenebraet Mutanite", "Azure Ice", "Crystalline Icicle", "Chartreuse Cytoserocin", "Gamboge Cytoserocin", "Hiemal Tricarboxyl Vapor"]:
-    if _n in _DEFAULT_COMPRESSION_RATIOS: _DEFAULT_COMPRESSION_RATIOS[_n] = 1
-for _n in ["Blue Ice", "Blue Ice IV-Grade", "Clear Icicle", "Clear Icicle IV-Grade", "Glacial Mass", "Glacial Mass IV-Grade", "White Glaze", "White Glaze IV-Grade", "Dark Glitter", "Gelidus", "Glare Crust", "Krystallos"]:
-    _DEFAULT_COMPRESSION_RATIOS[_n] = 10
-for _n in _DEFAULT_COMPRESSION_RATIOS:
-    if ("Cytoserocin" in _n or "Mykoserocin" in _n or "Fullerite" in _n):
-        if _DEFAULT_COMPRESSION_RATIOS[_n] != 1: _DEFAULT_COMPRESSION_RATIOS[_n] = 10
+_DEFAULT_COMPRESSION_RATIOS: Dict[str, int] = {
+    # Standard ore — 100:1
+    "Arkonor": 100, "Arkonor II-Grade": 100, "Arkonor III-Grade": 100, "Arkonor IV-Grade": 100,
+    "Bezdnacine": 100, "Bezdnacine II-Grade": 100, "Bezdnacine III-Grade": 100, "Bistot": 100,
+    "Bistot II-Grade": 100, "Bistot III-Grade": 100, "Bistot IV-Grade": 100, "Bitumens": 100,
+    "Bountiful Loparite": 100, "Bountiful Monazite": 100, "Bountiful Xenotime": 100, "Bountiful Ytterbite": 100,
+    "Brimful Bitumens": 100, "Brimful Coesite": 100, "Brimful Sylvite": 100, "Brimful Zeolites": 100,
+    "Carnotite": 100, "Chromite": 100, "Cinnabar": 100, "Cobaltite": 100,
+    "Coesite": 100, "Copious Cobaltite": 100, "Copious Euxenite": 100, "Copious Scheelite": 100,
+    "Copious Titanite": 100, "Crokite": 100, "Crokite II-Grade": 100, "Crokite III-Grade": 100,
+    "Crokite IV-Grade": 100, "Dark Ochre": 100, "Dark Ochre II-Grade": 100, "Dark Ochre III-Grade": 100,
+    "Dark Ochre IV-Grade": 100, "Ducinium": 100, "Ducinium II-Grade": 100, "Ducinium III-Grade": 100,
+    "Ducinium IV-Grade": 100, "Eifyrium": 100, "Eifyrium II-Grade": 100, "Eifyrium III-Grade": 100,
+    "Eifyrium IV-Grade": 100, "Euxenite": 100, "Glistening Bitumens": 100, "Glistening Coesite": 100,
+    "Glistening Sylvite": 100, "Glistening Zeolites": 100, "Glowing Carnotite": 100, "Glowing Cinnabar": 100,
+    "Glowing Pollucite": 100, "Glowing Zircon": 100, "Gneiss": 100, "Gneiss II-Grade": 100,
+    "Gneiss III-Grade": 100, "Gneiss IV-Grade": 100, "Griemeer": 100, "Griemeer II-Grade": 100,
+    "Griemeer III-Grade": 100, "Griemeer IV-Grade": 100, "Hedbergite": 100, "Hedbergite II-Grade": 100,
+    "Hedbergite III-Grade": 100, "Hedbergite IV-Grade": 100, "Hemorphite": 100, "Hemorphite II-Grade": 100,
+    "Hemorphite III-Grade": 100, "Hemorphite IV-Grade": 100, "Hezorime": 100, "Hezorime II-Grade": 100,
+    "Hezorime III-Grade": 100, "Hezorime IV-Grade": 100, "Jaspet": 100, "Jaspet II-Grade": 100,
+    "Jaspet III-Grade": 100, "Jaspet IV-Grade": 100, "Kernite": 100, "Kernite II-Grade": 100,
+    "Kernite III-Grade": 100, "Kernite IV-Grade": 100, "Kylixium": 100, "Kylixium II-Grade": 100,
+    "Kylixium III-Grade": 100, "Kylixium IV-Grade": 100, "Lavish Chromite": 100, "Lavish Otavite": 100,
+    "Lavish Sperrylite": 100, "Lavish Vanadinite": 100, "Loparite": 100, "Mercoxit": 100,
+    "Mercoxit II-Grade": 100, "Mercoxit III-Grade": 100, "Monazite": 100, "Mordunium": 100,
+    "Mordunium II-Grade": 100, "Mordunium III-Grade": 100, "Mordunium IV-Grade": 100, "Nocxite": 100,
+    "Nocxite II-Grade": 100, "Nocxite III-Grade": 100, "Nocxite IV-Grade": 100, "Omber": 100,
+    "Omber II-Grade": 100, "Omber III-Grade": 100, "Omber IV-Grade": 100, "Otavite": 100,
+    "Plagioclase": 100, "Plagioclase II-Grade": 100, "Plagioclase III-Grade": 100, "Plagioclase IV-Grade": 100,
+    "Pollucite": 100, "Pyroxeres": 100, "Pyroxeres II-Grade": 100, "Pyroxeres III-Grade": 100,
+    "Pyroxeres IV-Grade": 100, "Rakovene": 100, "Rakovene II-Grade": 100, "Rakovene III-Grade": 100,
+    "Replete Carnotite": 100, "Replete Cinnabar": 100, "Replete Pollucite": 100, "Replete Zircon": 100,
+    "Scheelite": 100, "Scordite": 100, "Scordite 0-Grade": 100, "Scordite II-Grade": 100,
+    "Scordite III-Grade": 100, "Scordite IV-Grade": 100, "Shimmering Chromite": 100, "Shimmering Otavite": 100,
+    "Shimmering Sperrylite": 100, "Shimmering Vanadinite": 100, "Shining Loparite": 100, "Shining Monazite": 100,
+    "Shining Xenotime": 100, "Shining Ytterbite": 100, "Sperrylite": 100, "Spodumain": 100,
+    "Spodumain II-Grade": 100, "Spodumain III-Grade": 100, "Spodumain IV-Grade": 100, "Sylvite": 100,
+    "Talassonite": 100, "Talassonite II-Grade": 100, "Talassonite III-Grade": 100, "Titanite": 100,
+    "Twinkling Cobaltite": 100, "Twinkling Euxenite": 100, "Twinkling Scheelite": 100, "Twinkling Titanite": 100,
+    "Ueganite": 100, "Ueganite II-Grade": 100, "Ueganite III-Grade": 100, "Ueganite IV-Grade": 100,
+    "Vanadinite": 100, "Veldspar": 100, "Veldspar 0-Grade": 100, "Veldspar II-Grade": 100,
+    "Veldspar III-Grade": 100, "Veldspar IV-Grade": 100, "Xenotime": 100, "Ytirium": 100,
+    "Ytirium II-Grade": 100, "Ytirium III-Grade": 100, "Ytirium IV-Grade": 100, "Ytterbite": 100,
+    "Zeolites": 100, "Zircon": 100,
+    # Ice / Gas — 10:1
+    "Amber Cytoserocin": 10, "Amber Mykoserocin": 10, "Azure Cytoserocin": 10, "Azure Mykoserocin": 10,
+    "Blue Ice": 10, "Blue Ice IV-Grade": 10, "Celadon Cytoserocin": 10, "Celadon Mykoserocin": 10,
+    "Clear Icicle": 10, "Clear Icicle IV-Grade": 10, "Dark Glitter": 10, "Fullerite-C28": 10,
+    "Fullerite-C32": 10, "Fullerite-C320": 10, "Fullerite-C50": 10, "Fullerite-C540": 10,
+    "Fullerite-C60": 10, "Fullerite-C70": 10, "Fullerite-C72": 10, "Fullerite-C84": 10,
+    "Gelidus": 10, "Glacial Mass": 10, "Glacial Mass IV-Grade": 10, "Glare Crust": 10,
+    "Golden Cytoserocin": 10, "Golden Mykoserocin": 10, "Krystallos": 10, "Lime Cytoserocin": 10,
+    "Lime Mykoserocin": 10, "Malachite Cytoserocin": 10, "Malachite Mykoserocin": 10, "Vermillion Cytoserocin": 10,
+    "Vermillion Mykoserocin": 10, "Viridian Cytoserocin": 10, "Viridian Mykoserocin": 10, "White Glaze": 10,
+    "White Glaze IV-Grade": 10,
+    # Not compressible — 1:1
+    "Admixti Mutanite": 1, "Amperum Mutanite": 1, "Augumene": 1, "Azure Ice": 1,
+    "Banidine": 1, "Chartreuse Cytoserocin": 1, "Conflagrati Mutanite": 1, "Crystalline Icicle": 1,
+    "Gamboge Cytoserocin": 1, "Geodite": 1, "Green Arisite": 1, "Hiemal Tricarboxyl Vapor": 1,
+    "Lyavite": 1, "Mercium": 1, "Nesosilicate Rakovene": 1, "Oeryl": 1,
+    "Peregrinus Mutanite": 1, "Pithix": 1, "Polygypsum": 1, "Solis Mutanite": 1,
+    "Tenebraet Mutanite": 1, "Tyranite": 1, "Zuthrine": 1,
+}
 
+# Charge les données de minerais depuis le fichier cache JSON local
 def _load_ore_data_from_cache():
     try:
         if os.path.exists(ORE_DATA_CACHE_FILE):
@@ -306,12 +389,14 @@ def _load_ore_data_from_cache():
     except Exception: pass
     return None
 
+# Sauvegarde les données de minerais analysées dans le fichier cache JSON
 def _save_ore_data_cache(data):
     try:
         with open(ORE_DATA_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
     except Exception as e: print(f"Warning: could not save ore data cache: {e}")
 
+# Analyse les fichiers JSONL du SDE pour extraire les volumes et ratios de compression des minerais
 def _parse_sde_ore_data(sde_dir):
     categories = {}
     with open(os.path.join(sde_dir, "categories.jsonl"), "r", encoding="utf-8") as f:
@@ -381,6 +466,7 @@ def _parse_sde_ore_data(sde_dir):
         "compression_ratios": compression_ratios
     }
 
+# Télécharge le SDE de CCP, extrait les fichiers nécessaires et retourne les données de minerais
 def download_and_parse_sde(progress_callback=None):
     if progress_callback: progress_callback("Downloading SDE from CCP...")
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -435,6 +521,9 @@ COMPRESSION_PATTERN = re.compile(r'Successfully compressed (?P<ore_type>[^\s]+) 
 RESIDUE_PATTERN = re.compile(r"Additional <font size=12><color=[^>]+>(?P<amount>\d+)<color=[^>]+><font size=10> units depleted from asteroid as residue", re.IGNORECASE)
 LISTENER_LINE = re.compile(r'Listener:\s*(.+)', re.IGNORECASE)
 LOG_TIMESTAMP = re.compile(r'^\[\s*(\d{4}\.\d{2}\.\d{2})\s+\d{2}:\d{2}:\d{2}\s*\]')
+# SDE download progress messages embed a percentage like "(34%)" — pre-compiled to avoid
+# creating a new pattern object on every progress callback invocation
+SDE_PROGRESS_PCT = re.compile(r'\((?P<pct>\d+)%\)')
 
 _ORE_CATEGORIES = {
     "Veldspar": "2ecc40", "Scordite": "2ecc40", "Pyroxeres": "2ecc40", "Plagioclase": "2ecc40", "Omber": "2ecc40", "Kernite": "2ecc40",
@@ -452,6 +541,7 @@ _ORE_CATEGORIES = {
 }
 
 @lru_cache(maxsize=512)
+# Retourne la couleur Excel (hex sans #) correspondant à la famille du minerai
 def _get_ore_excel_color(ore_name: str) -> str:
     ore_lower = ore_name.lower()
     for base_name, color in _ORE_CATEGORIES.items():
@@ -460,7 +550,9 @@ def _get_ore_excel_color(ore_name: str) -> str:
     if "fullerite" in ore_lower: return "00b894"
     return "ffffff"
 
+# Widget d'info-bulle affiché avec délai au survol d'un élément Tkinter
 class ToolTip:
+    # Initialise le tooltip et lie les événements souris au widget cible
     def __init__(self, widget, text=""):
         self.widget = widget
         self.text = text
@@ -470,22 +562,27 @@ class ToolTip:
         widget.bind("<Leave>", self._on_leave, add="+")
         widget.bind("<ButtonPress>", self._on_leave, add="+")
 
+    # Met à jour le texte affiché dans le tooltip
     def update_text(self, new_text):
         self.text = new_text
 
+    # Déclenche l'affichage du tooltip avec un délai de 400ms
     def _on_enter(self, event=None):
         self._cancel()
         self._after_id = self.widget.after(400, self._show)
 
+    # Annule et cache le tooltip quand la souris quitte le widget
     def _on_leave(self, event=None):
         self._cancel()
         self._hide()
 
+    # Annule le minuteur d'affichage en attente
     def _cancel(self):
         if self._after_id:
             self.widget.after_cancel(self._after_id)
             self._after_id = None
 
+    # Crée et positionne la fenêtre popup du tooltip
     def _show(self):
         if not self.text: return
         x = self.widget.winfo_rootx() + self.widget.winfo_width() // 2
@@ -498,55 +595,70 @@ class ToolTip:
         tw.geometry(f"+{x}+{y}")
         tk.Label(tw, text=self.text, bg="#1a2332", fg="#c0d8e8", font=("Consolas", 8), relief="solid", borderwidth=1, padx=6, pady=3, wraplength=260, justify="left").pack()
 
+    # Détruit la fenêtre popup du tooltip
     def _hide(self):
         if self.tipwindow:
             self.tipwindow.destroy()
             self.tipwindow = None
 
+# Représente un module de minage (laser/foreuse) avec rendement et temps de cycle
 class MiningModule:
+    # Initialise le module avec nom, rendement par cycle et temps de cycle
     def __init__(self, name: str = "", yield_per_cycle: float = 0.0, cycle_time: float = 0.0, enabled: bool = True):
         self.name = name
         self.yield_per_cycle = yield_per_cycle
         self.cycle_time = cycle_time
         self.enabled = enabled
 
+    # Retourne le débit du module en m³/s (0 si non configuré)
     def get_m3_per_sec(self) -> float:
         if self.yield_per_cycle > 0 and self.cycle_time > 0: return self.yield_per_cycle / self.cycle_time
         return 0.0
 
+    # Vérifie si le module a un rendement et un cycle valides
     def is_configured(self) -> bool:
         return self.yield_per_cycle > 0 and self.cycle_time > 0
 
+    # Sérialise le module en dictionnaire pour la sauvegarde JSON
     def to_dict(self) -> Dict:
         return {"name": self.name, "yield_per_cycle": self.yield_per_cycle, "cycle_time": self.cycle_time, "enabled": self.enabled}
 
     @staticmethod
+    # Crée un MiningModule depuis un dictionnaire de configuration
     def from_dict(data: Dict) -> 'MiningModule':
         return MiningModule(name=data.get("name", ""), yield_per_cycle=data.get("yield_per_cycle", 0.0), cycle_time=data.get("cycle_time", 0.0), enabled=data.get("enabled", True))
 
+# Représente le groupe de drones de minage d'un personnage (max 5)
 class MiningDrone:
     MAX_DRONES = 5
+    # Initialise les drones avec quantité (max 5), rendement par cycle et temps de cycle
     def __init__(self, count: int = 0, yield_per_cycle: float = 0.0, cycle_time: float = 0.0):
         self.count = max(0, min(count, self.MAX_DRONES))
         self.yield_per_cycle = yield_per_cycle
         self.cycle_time = cycle_time
 
+    # Retourne le débit total de tous les drones combinés en m³/s
     def get_total_m3_per_sec(self) -> float:
         if self.count > 0 and self.yield_per_cycle > 0 and self.cycle_time > 0:
             return (self.yield_per_cycle / self.cycle_time) * self.count
         return 0.0
 
+    # Vérifie si les drones ont une configuration complète et valide
     def is_configured(self) -> bool:
         return self.count > 0 and self.yield_per_cycle > 0 and self.cycle_time > 0
 
+    # Sérialise la configuration des drones en dictionnaire
     def to_dict(self) -> Dict:
         return {"count": self.count, "yield_per_cycle": self.yield_per_cycle, "cycle_time": self.cycle_time}
 
     @staticmethod
+    # Crée un MiningDrone depuis un dictionnaire de configuration
     def from_dict(data: Dict) -> 'MiningDrone':
         return MiningDrone(count=data.get("count", 0), yield_per_cycle=data.get("yield_per_cycle", 0.0), cycle_time=data.get("cycle_time", 0.0))
 
+# Suit toutes les données de minage et l'état de session d'un personnage EVE
 class CharacterTracker:
+    # Initialise les compteurs, profils de vaisseau et état de session du personnage
     def __init__(self, char_id: str, char_name: str):
         self.char_id = char_id
         self.char_name = char_name
@@ -570,19 +682,29 @@ class CharacterTracker:
         self.session_elapsed_offset: float = 0.0
         self.session_active: bool = False
 
+    # Retourne la durée active cumulée de la session en secondes
     def get_session_active_duration(self) -> float:
         if self.session_active: return self.session_elapsed_offset + (time.time() - self.session_start_time)
         return self.session_elapsed_offset
 
+    # Retourne les modules du profil actif
     def get_active_modules(self) -> List[MiningModule]: return self.ship_profiles.get(self.active_profile, [])
+    # Définit les modules du profil actif
     def set_active_modules(self, modules: List[MiningModule]): self.ship_profiles[self.active_profile] = modules
+    # Retourne les drones du profil actif
     def get_active_drones(self) -> MiningDrone: return self.drone_profiles.get(self.active_profile, MiningDrone())
+    # Définit les drones du profil actif
     def set_active_drones(self, drone: MiningDrone): self.drone_profiles[self.active_profile] = drone
+    # Retourne l'état de l'implant de minage pour le profil actif
     def get_active_implant(self) -> bool: return self.implant_profiles.get(self.active_profile, False)
+    # Active ou désactive l'implant pour le profil actif
     def set_active_implant(self, enabled: bool): self.implant_profiles[self.active_profile] = enabled
+    # Retourne la capacité cargo configurée pour le profil actif
     def get_active_capacity(self) -> float: return self.cargo_profiles.get(self.active_profile, 0.0)
+    # Définit la capacité cargo pour le profil actif
     def set_active_capacity(self, capacity: float): self.cargo_profiles[self.active_profile] = capacity
 
+    # Calcule le débit théorique total en m³/s (modules + drones + bonus implant)
     def get_total_theoretical_m3_per_sec(self) -> float:
         total_yield_sec = 0.0
         for module in self.get_active_modules():
@@ -595,13 +717,17 @@ class CharacterTracker:
         if drone.is_configured(): total_yield_sec += drone.get_total_m3_per_sec()
         return round(total_yield_sec, 1)
 
+    # Compte le nombre de modules actifs et correctement configurés
     def get_active_module_count(self) -> int: return sum(1 for m in self.get_active_modules() if m.enabled and m.is_configured())
+    # Vérifie si au moins un module ou drone est configuré dans le profil actif
     def has_any_configured_module(self) -> bool:
         has_module = any(m.is_configured() for m in self.get_active_modules())
         has_drone = self.get_active_drones().is_configured()
         return has_module or has_drone
 
+    # Retourne la liste des noms de profils de vaisseau
     def get_profile_names(self) -> List[str]: return list(self.ship_profiles.keys())
+    # Crée un nouveau profil vide pour tous les types de données (modules, drones, implant, cargo)
     def create_profile(self, name: str):
         if name and name not in self.ship_profiles:
             self.ship_profiles[name] = []
@@ -611,6 +737,7 @@ class CharacterTracker:
             return True
         return False
     
+    # Supprime un profil et bascule sur un autre si c'était le profil actif (min. 1 requis)
     def delete_profile(self, name: str) -> bool:
         if name in self.ship_profiles and len(self.ship_profiles) > 1:
             if self.active_profile == name:
@@ -625,6 +752,7 @@ class CharacterTracker:
             return True
         return False
     
+    # Renomme un profil en mettant à jour toutes les tables de données associées
     def rename_profile(self, old_name: str, new_name: str) -> bool:
         if old_name in self.ship_profiles and new_name and new_name not in self.ship_profiles:
             self.ship_profiles[new_name] = self.ship_profiles.pop(old_name)
@@ -635,7 +763,29 @@ class CharacterTracker:
             return True
         return False
 
+# ---------------------------------------------------------------------------
+# GAMELOG WATCHDOG — fires update_loop only when a log file actually changes,
+# replacing the old 500ms fixed-interval root.after() polling loop.
+# Runs in a background thread; all UI calls are routed via root.after(0, …).
+# ---------------------------------------------------------------------------
+class _GamelogHandler(FileSystemEventHandler):
+    def __init__(self, app):
+        self._app = app
+
+    def on_modified(self, event):
+        # New bytes written to an existing log file
+        if not event.is_directory:
+            self._app.root.after(0, self._app.update_loop)
+
+    def on_created(self, event):
+        # EVE started a new session log — need to pick up the new file path
+        if not event.is_directory:
+            self._app.root.after(0, self._app.update_loop)
+
+
+# Contrôleur principal de l'application : GUI Tkinter, lecture des logs EVE et état global
 class MiningDashboard:
+    # Initialise l'app, charge la config, construit l'UI et démarre la boucle de mise à jour
     def __init__(self):
         try:
             myappid = 'eve.mining.dashboard.v2'
@@ -714,10 +864,25 @@ class MiningDashboard:
         if HAS_PYSTRAY: self.setup_tray()
 
         self.update_loop()
-        self.root.deiconify() 
+
+        # Start watching the gamelog directory for file changes; this replaces
+        # the old UPDATE_INTERVAL_MS timer — updates now fire only on real I/O
+        _gamelog_dir = os.path.dirname(os.path.expanduser(DOCS))
+        self._gamelog_observer = None
+        if os.path.isdir(_gamelog_dir):
+            try:
+                _handler = _GamelogHandler(self)
+                self._gamelog_observer = Observer()
+                self._gamelog_observer.schedule(_handler, _gamelog_dir, recursive=False)
+                self._gamelog_observer.start()
+            except Exception as _e:
+                print(f"[error] MiningDashboard.__init__: watchdog failed to start on {_gamelog_dir}: {_e}")
+
+        self.root.deiconify()
         self.root.after(10, self.set_app_window)
         self.root.mainloop()
 
+    # Reconstruit toute l'interface après un changement de thème en préservant les géométries
     def rebuild_all_ui(self):
         """Called when themes change to regenerate all colors dynamically"""
         # Save geometries before destroying windows
@@ -758,6 +923,7 @@ class MiningDashboard:
                 self.hidden_windows.add(cid)
         self.rebuild_dashboard()
 
+    # Force l'apparition de la fenêtre dans la barre des tâches Windows (WS_EX_APPWINDOW)
     def set_app_window(self):
         GWL_EXSTYLE = -20
         WS_EX_APPWINDOW = 0x00040000
@@ -772,6 +938,7 @@ class MiningDashboard:
         self.root.deiconify()
         self.root.wm_attributes("-topmost", True)
 
+    # Scanne tous les fichiers logs EVE pour détecter les personnages actifs
     def discover_all_characters(self) -> Dict[str, CharacterTracker]:
         char_names: Dict[str, str] = {}
         char_counts: Dict[str, int] = {}
@@ -789,6 +956,7 @@ class MiningDashboard:
             result[char_id] = CharacterTracker(char_id, char_names[char_id])
         return result
 
+    # Retourne uniquement les personnages marqués comme visibles dans la config
     def get_visible_characters(self) -> Dict[str, CharacterTracker]:
         # Default to empty instead of loading all characters on first run
         visible_chars = self.app_config.get("visible_characters", None)
@@ -799,6 +967,7 @@ class MiningDashboard:
             if char_id in visible_chars: result[char_id] = tracker
         return result
 
+    # Sauvegarde la liste des personnages visibles et synchronise les fenêtres
     def save_visible_characters(self, visible_char_ids: List[str]):
         self.app_config["visible_characters"] = visible_char_ids
         self.save_config()
@@ -806,11 +975,13 @@ class MiningDashboard:
         self.sync_floating_windows()
         self.rebuild_dashboard()
 
+    # Persiste l'état des fenêtres masquées dans la config pour survivre aux redémarrages
     def _save_hidden_windows(self):
         # Persist the current hidden set to config so it survives restarts and theme rebuilds
         self.app_config["hidden_windows"] = list(self.hidden_windows)
         self.save_config()
 
+    # Crée ou détruit les fenêtres flottantes selon les personnages visibles actuels
     def sync_floating_windows(self):
         # Destroy windows for chars removed from config (visible_characters unchecked)
         for cid in list(self.floating_windows.keys()):
@@ -837,6 +1008,7 @@ class MiningDashboard:
                     if top and top.winfo_exists():
                         top.withdraw()
 
+    # Crée la fenêtre flottante dédiée à un personnage avec barre de titre, contenu et poignée de redimensionnement
     def create_floating_window(self, char_id: str, offset_i: int):
         tracker = self.all_characters[char_id]
         top = tk.Toplevel(self.root)
@@ -934,6 +1106,7 @@ class MiningDashboard:
             y = self.root.winfo_y() + 50 + (offset_i * 35)
             top.geometry(f"+{x}+{y}")
 
+    # Reconstruit le panneau hub principal avec la liste des personnages et leurs boutons
     def rebuild_dashboard(self):
         if self.chars_container:
             for widget in self.chars_container.winfo_children():
@@ -1023,17 +1196,20 @@ class MiningDashboard:
 
         # Intentionally removed the geometry snapping so it stays where you resized it!
 
+    # Génère une icône simple (disque coloré) pour la barre système
     def create_tray_image(self):
         image = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
         d = ImageDraw.Draw(image)
         d.ellipse((8, 8, 56, 56), fill=CYAN)
         return image
 
+    # Retourne le chemin absolu d'une ressource, compatible avec PyInstaller (_MEIPASS)
     def get_resource_path(self, relative_path):
         if hasattr(sys, '_MEIPASS'):
             return os.path.join(sys._MEIPASS, relative_path)
         return os.path.join(os.path.abspath("."), relative_path)
 
+    # Initialise l'icône de la barre système et son menu contextuel (pystray)
     def setup_tray(self):
         icon_path = self.get_resource_path("mining_icon.ico")
         try:
@@ -1049,11 +1225,13 @@ class MiningDashboard:
         self.tray_icon = pystray.Icon("mining_dash", icon_img, "EVE Mining Dashboard", menu)
         threading.Thread(target=self.tray_icon.run, daemon=True).start()
 
+    # Affiche la fenêtre principale depuis la barre système
     def show_window(self, icon=None, item=None):
         self.root.after(0, self.root.deiconify)
         self.root.after(0, self.root.lift)
         self.root.after(0, lambda: self.root.attributes("-topmost", True))
 
+    # Retourne tous les fichiers .txt dans le répertoire de logs EVE (scan récursif)
     def _get_all_log_files(self) -> List[str]:
         base_dir = DOCS.rstrip('\\').rstrip('/').rstrip('*')
         pattern = os.path.join(base_dir, '**', '*')
@@ -1061,6 +1239,7 @@ class MiningDashboard:
         return [f for f in all_files if f.lower().endswith('.txt')]
 
     @staticmethod
+    # Extrait l'ID numérique du personnage depuis le nom de fichier log (3e segment séparé par _)
     def _get_char_id_from_file(filepath: str) -> Optional[str]:
         basename = os.path.splitext(os.path.basename(filepath))[0]
         parts = basename.split('_')
@@ -1070,6 +1249,7 @@ class MiningDashboard:
         return None
 
     @staticmethod
+    # Lit les 15 premières lignes du log pour trouver et retourner le nom du personnage (Listener:)
     def _read_listener_name(filepath: str) -> Optional[str]:
         try:
             with open(filepath, 'r', encoding='utf-8-sig', errors='ignore') as f:
@@ -1080,6 +1260,7 @@ class MiningDashboard:
         except Exception: pass
         return None
 
+    # Retourne la liste des fichiers log avec mise en cache TTL (5s) pour limiter les appels glob
     def _get_cached_log_files(self) -> List[str]:
         now = time.time()
         if now - self._glob_cache_time > self._glob_cache_ttl:
@@ -1089,11 +1270,13 @@ class MiningDashboard:
             self._glob_cache_time = now
         return self._glob_cache
 
+    # Retourne le fichier log le plus récent pour un personnage donné
     def _get_latest_log_for_char(self, char_id: str) -> Optional[str]:
         files = self._get_cached_log_files()
         char_files = [f for f in files if self._get_char_id_from_file(f) == char_id]
         return max(char_files, key=os.path.getmtime) if char_files else None
 
+    # Enregistre la position initiale pour le glissement de la fenêtre principale
     def _start_drag(self, event):
         widget = event.widget
         if isinstance(widget, tk.Button): return
@@ -1102,6 +1285,7 @@ class MiningDashboard:
         self._drag_x = event.x
         self._drag_y = event.y
 
+    # Déplace la fenêtre principale en suivant le mouvement de la souris
     def _do_drag(self, event):
         widget = event.widget
         if isinstance(widget, tk.Button): return
@@ -1111,9 +1295,11 @@ class MiningDashboard:
         y = self.root.winfo_y() + event.y - self._drag_y
         self.root.geometry(f"+{x}+{y}")
 
+    # Cache la fenêtre principale dans la barre système
     def minimize_to_tray(self, event=None):
         self.root.withdraw()
 
+    # Bascule le mode "toujours au-dessus" et met à jour l'icône de punaise
     def toggle_pin(self, event=None):
         is_top = self.root.attributes("-topmost")
         new_state = not is_top
@@ -1121,6 +1307,7 @@ class MiningDashboard:
         if new_state: self.pin_icon.config(fg=CYAN)
         else: self.pin_icon.config(fg=DIM)
 
+    # Bascule l'enroulement style EVE : double-clic réduit la fenêtre à la barre de titre seulement
     def toggle_rollup(self, event=None):
         # EVE-style window shade: double-click title bar collapses to just the title bar
         # Guard: ignore double-clicks on interactive widgets (buttons, icons, grip)
@@ -1194,6 +1381,7 @@ class MiningDashboard:
 
             self._is_rolled_up = True
 
+    # Construit l'interface principale : barre de titre, panneau personnages et bouton historique
     def setup_ui(self) -> None:
         border_frame = tk.Frame(self.root, bg=BORDER, padx=1, pady=1)
         border_frame.pack(fill="both", expand=True)
@@ -1274,6 +1462,7 @@ class MiningDashboard:
         grip.bind("<Enter>", lambda e, g=grip: g.config(fg=CYAN))
         grip.bind("<Leave>", lambda e, g=grip: g.config(fg=DIM))
 
+    # Crée tous les widgets de la colonne d'un personnage (stats, cargo, boutons, breakdown)
     def _create_char_column(self, parent, tracker: CharacterTracker, accent_color: str, char_id: str):
         col_outer = tk.Frame(parent, bg=BORDER, padx=1, pady=1)
         col_inner = tk.Frame(col_outer, bg=BG_PANEL, padx=10, pady=8)
@@ -1414,6 +1603,7 @@ class MiningDashboard:
         }
         return col_outer, widgets
 
+    # Ouvre la fenêtre d'historique de minage avec sélection de la période
     def show_history(self) -> None:
         if self.history_window is None or not self.history_window.winfo_exists():
             self.history_button.config(state="disabled")
@@ -1501,6 +1691,7 @@ class MiningDashboard:
 
             self.calculate_and_display_history(text_widget)
 
+    # Calcule le nombre de jours d'historique disponibles selon les fichiers log présents
     def get_max_history_days(self) -> int:
         try:
             all_files = self._get_all_log_files()
@@ -1512,6 +1703,7 @@ class MiningDashboard:
             return max(1, days_available)
         except Exception: return HISTORY_DAYS
 
+    # Gère la fermeture de la fenêtre historique et réactive le bouton
     def on_history_close(self):
         if self.history_window:
             self.app_config["history_win_geom"] = self.history_window.geometry()
@@ -1520,6 +1712,7 @@ class MiningDashboard:
             self.history_window = None
             self.history_button.config(state="normal")
 
+    # Lit les logs, calcule les totaux par personnage/minerai et affiche dans le widget texte
     def calculate_and_display_history(self, text_widget: tk.Text):
         text_widget.config(state="normal")
         text_widget.delete("1.0", tk.END)
@@ -1588,6 +1781,7 @@ class MiningDashboard:
         text_widget.insert("1.0", result)
         text_widget.config(state="disabled")
 
+    # Rassemble et retourne les données de minage agrégées sur N jours pour l'export
     def _gather_history_data(self, days: int):
         try:
             days = int(days)
@@ -1623,6 +1817,7 @@ class MiningDashboard:
                 except Exception: continue
         return per_char_ores, per_char_m3, combined_m3, days
 
+    # Rassemble les données de minage groupées par jour et par personnage pour l'export journalier
     def _gather_daily_history_data(self, days: int):
         try:
             days = int(days)
@@ -1667,6 +1862,7 @@ class MiningDashboard:
         sorted_ores = sorted(all_ore_names)
         return per_char_daily, sorted_ores, sorted_dates, days
 
+    # Génère le chemin de fichier de l'export Excel avec suffixe et nombre de jours
     def _get_export_path(self, suffix: str, days: int) -> str:
         export_dir = self.app_config.get("app_settings", {}).get("export_dir", "")
         if not export_dir or not os.path.isdir(export_dir):
@@ -1675,6 +1871,7 @@ class MiningDashboard:
         filename = f"mining_{suffix}_{timestamp}_{days}d.xlsx"
         return os.path.join(export_dir, filename)
 
+    # Affiche le menu contextuel avec les options d'export Excel
     def show_export_menu(self, button_widget):
         if not HAS_OPENPYXL:
             messagebox.showwarning("Missing Library", "openpyxl is required for Excel export.\n\npip install openpyxl")
@@ -1693,6 +1890,7 @@ class MiningDashboard:
             menu.tk_popup(x, y)
         finally: menu.grab_release()
 
+    # Lance l'export Excel du type demandé (summary, daily, pivot ou complet)
     def _do_export(self, export_type: str):
         try: days = int(self.history_days_var.get())
         except (ValueError, AttributeError): days = HISTORY_DAYS
@@ -1708,6 +1906,7 @@ class MiningDashboard:
         except Exception as e:
             messagebox.showerror("Export Error", f"Failed to export:\n{str(e)}", parent=self.history_window or self.root)
 
+    # Applique le style d'en-tête EVE (couleur, police bold) à une cellule Excel
     def _apply_eve_header(self, ws, row, col, text, width=None, is_title=False):
         cell = ws.cell(row=row, column=col, value=text)
         if is_title:
@@ -1721,6 +1920,7 @@ class MiningDashboard:
         if width: ws.column_dimensions[get_column_letter(col)].width = width
         return cell
 
+    # Applique le style de cellule de données (nombre, texte, total) à une cellule Excel
     def _apply_eve_data_cell(self, ws, row, col, value, fmt="number", ore_name=None, is_total=False):
         cell = ws.cell(row=row, column=col, value=value)
         if is_total:
@@ -1745,6 +1945,7 @@ class MiningDashboard:
         else: cell.alignment = Alignment(horizontal="left")
         return cell
 
+    # Applique la couleur de catégorie du minerai à une cellule d'étiquette Excel
     def _apply_eve_ore_label(self, ws, row, col, ore_name):
         cell = ws.cell(row=row, column=col, value=ore_name)
         ore_color = _get_ore_excel_color(ore_name)
@@ -1754,8 +1955,10 @@ class MiningDashboard:
         cell.border = Border(bottom=Side(style="thin", color="1E3A4A"), left=Side(style="thin", color="1E3A4A"), right=Side(style="thin", color="1E3A4A"))
         return cell
 
+    # Applique la couleur d'onglet EVE à une feuille Excel
     def _style_eve_sheet(self, ws): ws.sheet_properties.tabColor = "3DD8E0"
 
+    # Génère le fichier Excel de résumé global par personnage sur N jours
     def _export_summary(self, days: int) -> str:
         per_char_ores, per_char_m3, combined_m3, days = self._gather_history_data(days)
         filepath = self._get_export_path("summary", days)
@@ -1826,6 +2029,7 @@ class MiningDashboard:
         wb.save(filepath)
         return filepath
 
+    # Génère le fichier Excel avec une feuille par personnage détaillant les totaux journaliers
     def _export_daily_breakdown(self, days: int) -> str:
         per_char_daily, sorted_ores, sorted_dates, days = self._gather_daily_history_data(days)
         filepath = self._get_export_path("daily", days)
@@ -1894,6 +2098,7 @@ class MiningDashboard:
         wb.save(filepath)
         return filepath
 
+    # Génère le fichier Excel pivot : minerais en lignes, personnages en colonnes
     def _export_ore_pivot(self, days: int) -> str:
         per_char_ores, per_char_m3, combined_m3, days = self._gather_history_data(days)
         filepath = self._get_export_path("pivot", days)
@@ -1953,6 +2158,7 @@ class MiningDashboard:
         wb.save(filepath)
         return filepath
 
+    # Génère un fichier Excel complet avec tous les onglets (résumé, journalier, pivot)
     def _export_full(self, days: int) -> str:
         per_char_ores, per_char_m3, combined_m3, days_used = self._gather_history_data(days)
         per_char_daily, sorted_ores_daily, sorted_dates, _ = self._gather_daily_history_data(days)
@@ -2108,6 +2314,7 @@ class MiningDashboard:
         return filepath
 
     @lru_cache(maxsize=256)
+    # Retourne le volume en m³ et le nom normalisé d'un type de minerai depuis le cache SDE
     def get_ore_volume(self, raw_name: str) -> Tuple[float, str]:
         clean_name = raw_name.strip().rstrip('.')
         if clean_name in ORE_VOLUMES: return ORE_VOLUMES[clean_name], clean_name
@@ -2116,6 +2323,7 @@ class MiningDashboard:
             if base_ore.lower() in clean_lower: return volume, clean_name
         return 1.0, clean_name
 
+    # Restaure les paramètres sauvegardés (thème, transparence, topmost) depuis la config
     def _apply_saved_app_settings(self):
         global DOCS, CRIT_SOUND_FILE, UPDATE_INTERVAL_MS, HISTORY_DAYS, CRITICAL_HIT_KEYWORD, PLAY_CRIT_SOUND
         app_settings = self.app_config.get("app_settings", {})
@@ -2127,6 +2335,7 @@ class MiningDashboard:
         if "crit_keyword" in app_settings: CRITICAL_HIT_KEYWORD = app_settings["crit_keyword"]
         if "play_crit_sound" in app_settings: PLAY_CRIT_SOUND = app_settings["play_crit_sound"]
 
+    # Charge la configuration JSON depuis le disque (retourne un dict vide si absent)
     def load_config(self) -> Dict:
         if os.path.exists(CONFIG_FILE):
             try:
@@ -2134,6 +2343,7 @@ class MiningDashboard:
             except Exception: return {}
         return {}
 
+    # Sauvegarde la configuration actuelle dans le fichier JSON
     def save_config(self) -> None:
         self.app_config["win_geom"] = self.root.winfo_geometry()
         try:
@@ -2141,8 +2351,16 @@ class MiningDashboard:
                 json.dump(self.app_config, f, indent=2)
         except Exception: pass
 
+    # Fermeture propre : sauvegarde la géométrie/config, arrête le tray et quitte
     def on_close(self) -> None:
         self.update_loop_running = False
+        obs = getattr(self, '_gamelog_observer', None)
+        if obs is not None:
+            try:
+                obs.stop()
+                obs.join(timeout=2.0)
+            except Exception as e:
+                print(f"[error] on_close: could not stop gamelog observer: {e}")
         tray = getattr(self, 'tray_icon', None)
         if tray is not None:
             try: tray.stop()
@@ -2160,6 +2378,7 @@ class MiningDashboard:
         except Exception: pass
         os._exit(0)
 
+    # Boucle principale : lit les nouveaux logs et met à jour l'UI toutes les 500ms
     def update_loop(self) -> None:
         if not self.update_loop_running: return
         try:
@@ -2184,8 +2403,10 @@ class MiningDashboard:
                     except Exception: pass
             self._update_ui_labels()
         except Exception: pass
-        finally: self.root.after(UPDATE_INTERVAL_MS, self.update_loop)
+        # No reschedule here — _GamelogHandler.on_modified/on_created calls
+        # root.after(0, self.update_loop) whenever a gamelog file changes
 
+    # Parse les lignes de log EVE pour extraire minage normal, critique, compression et résidu
     def _process_log_data(self, tracker: CharacterTracker, data: str) -> None:
         if not tracker.session_active: return
         crit_processed = False
@@ -2253,9 +2474,9 @@ class MiningDashboard:
                 units = float(residue_match.group('amount').replace(",", ""))
                 total_volume = units * last_mined_volume
                 tracker.total_residue_m3 += total_volume
-                if not hasattr(tracker, 'residue_summary'): tracker.residue_summary = {}
                 tracker.residue_summary[last_mined_ore] = tracker.residue_summary.get(last_mined_ore, 0) + total_volume
 
+    # Met à jour tous les labels, barres cargo et stats de débit de l'interface
     def _update_ui_labels(self) -> None:
         char_widgets = self.char_widgets  # Local reference for faster lookup
         has_webhook = self._is_valid_webhook_url()
@@ -2323,6 +2544,7 @@ class MiningDashboard:
 
             self._update_rate_stats(char_id, tracker, w)
 
+    # Joue le son d'alerte critique et envoie une notification bureau si disponible
     def trigger_crit_alert(self) -> None:
         if HAS_NOTIFICATION:
             try: notification.notify(title="MINING", message="Critical Hit!", timeout=1)
@@ -2333,6 +2555,7 @@ class MiningDashboard:
                 winsound.PlaySound(CRIT_SOUND_FILE, winsound.SND_FILENAME | winsound.SND_ASYNC)
             except Exception: pass
 
+    # Démarre ou arrête la session de minage pour un personnage donné
     def toggle_session(self, char_id: str):
         tracker = self.all_characters[char_id]
         widgets = self.char_widgets[char_id]
@@ -2365,11 +2588,13 @@ class MiningDashboard:
             tracker.session_elapsed_offset += time.time() - tracker.session_start_time
             widgets['start_stop_btn'].config(text="▶ START", fg=GREEN)
 
+    # Remet le cargo à zéro pour simuler un déchargement en station
     def empty_cargo(self, char_id: str):
         tracker = self.all_characters[char_id]
         tracker.current_cargo = 0.0
         self._update_ui_labels()
 
+    # Réinitialise complètement la session : compteurs, cargo et position dans le log
     def reset_session(self, char_id: str):
         tracker = self.all_characters[char_id]
         widgets = self.char_widgets[char_id]
@@ -2401,6 +2626,7 @@ class MiningDashboard:
         if not self._is_valid_webhook_url(): widgets['send_tip'].update_text("No mining data and no webhook URL configured")
         else: widgets['send_tip'].update_text("No mining data yet \u2014 start mining to enable")
 
+    # Charge les profils de vaisseau (modules, drones, implants, cargo) depuis la config JSON
     def load_ship_configs(self):
         ship_configs = self.app_config.get("ship_configs", {})
         for char_id, tracker in self.all_characters.items():
@@ -2449,6 +2675,7 @@ class MiningDashboard:
                         tracker.cargo_profiles["Default"] = 0.0
                         tracker.active_profile = "Default"
 
+    # Sauvegarde tous les profils de vaisseau de tous les personnages dans la config JSON
     def save_ship_configs(self):
         ship_configs = {}
         for char_id, tracker in self.all_characters.items():
@@ -2470,6 +2697,7 @@ class MiningDashboard:
         self.app_config["ship_configs"] = ship_configs
         self.save_config()
 
+    # Ouvre le dialogue de configuration du vaisseau : modules, drones, implant et cargo
     def show_ship_config(self, char_id: str):
         if char_id in self.ship_config_dialogs and self.ship_config_dialogs[char_id].winfo_exists():
             self.ship_config_dialogs[char_id].lift()
@@ -2806,6 +3034,7 @@ class MiningDashboard:
 
         dialog.after(150, initial_focus)
 
+    # Affiche une boîte de dialogue modale centrée pour saisir une chaîne de texte
     def _ask_string_centered(self, title, prompt, parent_dialog, initialvalue=""):
         result = [None]
         dlg = tk.Toplevel(parent_dialog)
@@ -2847,6 +3076,7 @@ class MiningDashboard:
         dlg.wait_window()
         return result[0] if result[0] else None
 
+    # Crée un nouveau profil vide via dialogue et réinitialise les champs de l'UI
     def create_new_profile(self, tracker: CharacterTracker, current_profile_var: tk.StringVar, profile_menu: tk.OptionMenu, module_vars: List, update_preview_fn, parent_dialog=None, drone_vars=None, implant_var=None, cargo_cap_var=None):
         parent = parent_dialog or self.root
         new_name = self._ask_string_centered("New Profile", "Enter name for new ship profile:", parent)
@@ -2872,12 +3102,13 @@ class MiningDashboard:
                     drone_vars['yield'].set("")
                     drone_vars['cycle'].set("")
                 if implant_var: implant_var.set(False)
-                if 'cargo_cap_var' in locals(): cargo_cap_var.set("")
+                if cargo_cap_var is not None: cargo_cap_var.set("")
                 
                 update_preview_fn()
             else:
                 messagebox.showerror("Error", "Profile name already exists or is invalid")
 
+    # Renomme le profil actif via dialogue et met à jour le menu déroulant
     def rename_current_profile(self, tracker: CharacterTracker, current_profile_var: tk.StringVar, profile_menu: tk.OptionMenu, parent_dialog=None):
         old_name = tracker.active_profile
         if len(tracker.ship_profiles) == 1:
@@ -2896,6 +3127,7 @@ class MiningDashboard:
             else:
                 messagebox.showerror("Error", "Profile name already exists or is invalid", parent=parent)
 
+    # Supprime le profil actif après confirmation et bascule sur le suivant disponible
     def delete_current_profile(self, tracker: CharacterTracker, current_profile_var: tk.StringVar, profile_menu: tk.OptionMenu, module_vars: List, update_preview_fn, parent_dialog=None, drone_vars=None, implant_var=None, cargo_cap_var=None):
         profile_to_delete = tracker.active_profile
         parent = parent_dialog or self.root
@@ -2932,6 +3164,7 @@ class MiningDashboard:
                 if implant_var: implant_var.set(tracker.get_active_implant())
                 update_preview_fn()
 
+    # Affiche un menu contextuel pour choisir ou créer un profil depuis l'interface principale
     def show_profile_picker(self, char_id: str, event):
         tracker = self.all_characters.get(char_id)
         if not tracker: return
@@ -2946,6 +3179,7 @@ class MiningDashboard:
         try: menu.tk_popup(event.x_root, event.y_root)
         finally: menu.grab_release()
 
+    # Change le profil actif d'un personnage depuis l'interface principale et met à jour l'UI
     def switch_profile_from_main(self, char_id: str, profile_name: str):
         tracker = self.all_characters.get(char_id)
         if not tracker or profile_name == tracker.active_profile: return
@@ -2954,6 +3188,7 @@ class MiningDashboard:
         self.update_profile_label(char_id)
         self.update_ship_indicator(char_id)
 
+    # Crée un nouveau profil directement depuis l'interface principale (sans ouvrir ship config)
     def create_profile_from_main(self, char_id: str):
         tracker = self.all_characters.get(char_id)
         if not tracker: return
@@ -2967,6 +3202,7 @@ class MiningDashboard:
             else:
                 messagebox.showerror("Error", "Profile name already exists or is invalid", parent=self.root)
 
+    # Met à jour l'indicateur ◆ selon que le vaisseau est configuré ou non
     def update_ship_indicator(self, char_id: str):
         tracker = self.all_characters[char_id]
         if char_id not in self.char_widgets: return
@@ -2974,11 +3210,13 @@ class MiningDashboard:
         if tracker.has_any_configured_module(): widgets['ship_indicator'].config(fg=GREEN)
         else: widgets['ship_indicator'].config(fg=RED)
 
+    # Met à jour l'étiquette du profil actif affiché dans l'interface principale
     def update_profile_label(self, char_id: str):
         tracker = self.all_characters[char_id]
         if char_id not in self.char_widgets: return
         self.char_widgets[char_id]['profile_label'].config(text=f"\u3008{tracker.active_profile}\u3009")
 
+    # Calcule et affiche le débit réel (m³/s) et la durée de session formatée
     def _update_rate_stats(self, char_id: str, tracker: CharacterTracker, widgets: Dict):
         theoretical_m3_per_sec = tracker.get_total_theoretical_m3_per_sec()
         if theoretical_m3_per_sec > 0: widgets['theoretical'].config(text=f"◈ Theoretical: {theoretical_m3_per_sec:.2f} m3/s ({theoretical_m3_per_sec * 3600:,.0f} m3/hr)")
@@ -2993,6 +3231,7 @@ class MiningDashboard:
 
         widgets['actual'].config(text=f"◉ Actual: {actual_m3_per_sec:.2f} m3/s ({actual_m3_per_sec * 3600:,.0f} m3/hr)")
 
+    # Ouvre la boîte de dialogue des paramètres : personnages, thème, sons, chemins, webhook
     def show_config_dialog(self):
         global DOCS, UPDATE_INTERVAL_MS, HISTORY_DAYS
 
@@ -3215,9 +3454,9 @@ class MiningDashboard:
                 try:
                     def progress(msg):
                         try:
-                            pct_match = re.search(r'\((\d+)%\)', msg)
+                            pct_match = SDE_PROGRESS_PCT.search(msg)
                             if pct_match:
-                                pct_val = int(pct_match.group(1)) / 100.0
+                                pct_val = int(pct_match.group('pct')) / 100.0
                                 dialog.after(0, lambda p=pct_val, m=msg: _update_sde_progress(p, m))
                             elif "Extracting" in msg: dialog.after(0, lambda m=msg: _update_sde_progress(0.85, m))
                             elif "Parsing" in msg: dialog.after(0, lambda m=msg: _update_sde_progress(0.95, m))
@@ -3343,11 +3582,13 @@ class MiningDashboard:
 
         dialog.after(150, initial_focus)
 
+    # Vérifie si l'URL du webhook Discord configurée est valide (commence par https://discord.com/api/webhooks/)
     def _is_valid_webhook_url(self) -> bool:
         url = self.fleet_webhook_url.strip()
         if not url: return False
         return url.startswith("https://discord.com/api/webhooks/") or url.startswith("https://discordapp.com/api/webhooks/")
 
+    # Active ou désactive les boutons Copy/Send selon les données disponibles et le webhook configuré
     def _update_send_button_states(self):
         has_webhook = self._is_valid_webhook_url()
         for cid, w in self.char_widgets.items():
@@ -3369,6 +3610,7 @@ class MiningDashboard:
                 if not has_webhook: w['send_tip'].update_text("No mining data and no webhook URL configured")
                 else: w['send_tip'].update_text("No mining data yet \u2014 start mining to enable")
 
+    # Génère le texte formaté du rapport de session (totaux, minerais, débit, durée)
     def _build_session_report_text(self, tracker: CharacterTracker) -> str:
         session_duration = tracker.get_session_active_duration()
         hours = int(session_duration // 3600)
@@ -3394,10 +3636,12 @@ class MiningDashboard:
         lines.append(f"Total: {total_m3:,.1f} m³")
         return "\n".join(lines)
 
+    # Construit le payload JSON (embed Discord) prêt à envoyer au webhook
     def _build_discord_payload(self, tracker: CharacterTracker) -> Dict:
         report_text = self._build_session_report_text(tracker)
         return {"content": report_text}
 
+    # Copie le rapport de session du personnage dans le presse-papiers Windows
     def copy_session_report(self, char_id: str):
         tracker = self.all_characters.get(char_id)
         if not tracker: return
@@ -3419,6 +3663,7 @@ class MiningDashboard:
                 btn.config(text="✓ Copied!", fg=GREEN)
                 btn.after(2000, lambda: btn.config(text=original_text, fg=original_fg))
 
+    # Ouvre le dialogue de prévisualisation et d'envoi du rapport vers Discord
     def show_send_report_dialog(self, char_id: str):
         tracker = self.all_characters.get(char_id)
         if not tracker: return
@@ -3489,6 +3734,7 @@ class MiningDashboard:
         x, y = px + (pw - dw) // 2, py + (ph - dh) // 2
         dlg.geometry(f"+{x}+{y}")
 
+    # Envoie le rapport de session au webhook Discord configuré via HTTP POST
     def _send_to_webhook(self, char_id: str):
         tracker = self.all_characters.get(char_id)
         if not tracker or not self.fleet_webhook_url: return
@@ -3520,6 +3766,7 @@ class MiningDashboard:
         except Exception as e:
             messagebox.showerror("Send Failed", f"Error: {str(e)}", parent=self.root)
 
+    # Réactive l'icône ⚙ après la fermeture du dialogue de config
     def _enable_config_icon(self):
         self.config_icon.config(fg=DIM)
         self.config_icon.bind("<Button-1>", lambda e: self.show_config_dialog())
