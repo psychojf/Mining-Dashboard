@@ -2446,7 +2446,8 @@ class MiningDashboard:
                 original_units = compressed_amount * compression_ratio
                 volume_per_unit, ore_name = self.get_ore_volume(ore_type)
                 total_raw_volume = original_units * volume_per_unit
-                tracker.current_cargo = max(0.0, tracker.current_cargo - total_raw_volume)
+                compressed_volume = total_raw_volume / compression_ratio if compression_ratio > 0 else total_raw_volume
+                tracker.current_cargo = max(0.0, tracker.current_cargo - total_raw_volume + compressed_volume)
                 tracker.compression_log[ore_name] = tracker.compression_log.get(ore_name, 0) + total_raw_volume
                 continue
 
