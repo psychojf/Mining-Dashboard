@@ -218,7 +218,7 @@ def draw_neon_bar(canvas, pct, bar_color=None, glow=True, segments=True):
 
 # ---------------------------------------------------------------------------
 # ORE / ICE / GAS DATA  (SDE-aware, auto-updatable)
-# Source: EVE Online SDE build 3294658 (Apr 10, 2026)
+# Source: EVE Online SDE build 3294658 (Apr 12, 2026)
 # ---------------------------------------------------------------------------
 ORE_DATA_CACHE_FILE = "ore_data_cache.json"
 SDE_LATEST_URL = "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip"
@@ -230,7 +230,7 @@ SDE_SKIP_GROUPS = {
     "AIR Ore Asteroid Resources"
 }
 
-# Source: EVE Online SDE build 3294658 (Apr 10, 2026)
+# Source: EVE Online SDE build 3294658 (Apr 12, 2026)
 # To update before building the exe, run ore_data.py and copy its _SEED_VOLUMES /
 # _build_seed_ratios() output into these two dicts.
 _DEFAULT_ORE_VOLUMES: Dict[str, float] = {
@@ -3254,6 +3254,62 @@ class MiningDashboard:
             self.config_dialog.focus_force()
             return
 
+        # ── helpers ──────────────────────────────────────────────────────
+        def _sep(parent):
+            tk.Frame(parent, bg=BORDER, height=1).pack(fill="x", pady=8)
+
+        def _section_label(parent, text):
+            tk.Label(parent, text=text, fg=CYAN, bg=BG_PANEL,
+                     font=("Consolas", 9, "bold")).pack(anchor="w", pady=(0, 10))
+
+        def _card(parent, pady=(0, 10)):
+            outer = tk.Frame(parent, bg=BORDER, padx=1, pady=1)
+            outer.pack(fill="x", pady=pady)
+            inner = tk.Frame(outer, bg=BG_CARD, padx=14, pady=12)
+            inner.pack(fill="both", expand=True)
+            return inner
+
+        def _field_row(parent, label, var_or_val, width=28, note=None):
+            row = tk.Frame(parent, bg=BG_CARD)
+            row.pack(fill="x", pady=3)
+            tk.Label(row, text=label, fg=DIM, bg=BG_CARD,
+                     font=("Consolas", 9), width=22, anchor="w").pack(side="left")
+            if isinstance(var_or_val, tk.StringVar):
+                var = var_or_val
+            else:
+                var = tk.StringVar(value=str(var_or_val))
+            e = tk.Entry(row, textvariable=var, width=width,
+                         font=("Consolas", 9), bg=BG, fg=WHITE,
+                         insertbackground=CYAN, relief="flat",
+                         highlightthickness=1,
+                         highlightbackground=BORDER, highlightcolor=CYAN)
+            e.pack(side="left")
+            if note:
+                tk.Label(row, text=note, fg=GOLD, bg=BG_CARD,
+                         font=("Consolas", 8)).pack(side="left", padx=(6, 0))
+            return var
+
+        def _make_scrollable(parent):
+            canvas = tk.Canvas(parent, bg=BG_PANEL, highlightthickness=0, bd=0)
+            sb = tk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+            canvas.configure(yscrollcommand=sb.set)
+            inner = tk.Frame(canvas, bg=BG_PANEL, padx=18, pady=14)
+            win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+            def _resize(e): canvas.itemconfig(win_id, width=e.width)
+            def _scroll_region(e): canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.bind("<Configure>", _resize)
+            inner.bind("<Configure>", _scroll_region)
+            canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>",
+                lambda ev: canvas.yview_scroll(int(-1*(ev.delta/120)), "units")))
+            canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+            canvas.pack(side="left", fill="both", expand=True)
+            sb.pack(side="right", fill="y")
+            return inner
+
+        # ── constants ────────────────────────────────────────────────────
+        NAV_W    = 140
+        BG_CARD  = "#0f1620"
+
         self.config_icon.config(fg=CYAN)
         self.config_icon.unbind("<Button-1>")
         self.config_icon.unbind("<Enter>")
@@ -3267,38 +3323,34 @@ class MiningDashboard:
         dialog.resizable(False, False)
         self.config_dialog = dialog
 
-        _drag_x = [0]
-        _drag_y = [0]
+        _drag_x = [0]; _drag_y = [0]
         def start_drag(event):
             if isinstance(event.widget, (tk.Entry, ttk.Combobox)): return
-            _drag_x[0] = event.x
-            _drag_y[0] = event.y
+            _drag_x[0] = event.x; _drag_y[0] = event.y
         def do_drag(event):
             if isinstance(event.widget, (tk.Entry, ttk.Combobox)): return
-            x = dialog.winfo_x() + event.x - _drag_x[0]
-            y = dialog.winfo_y() + event.y - _drag_y[0]
-            dialog.geometry(f"+{x}+{y}")
+            dialog.geometry(f"+{dialog.winfo_x()+event.x-_drag_x[0]}+{dialog.winfo_y()+event.y-_drag_y[0]}")
 
-        config_key = "config_dialog_geom"
-        saved_geom = self.app_config.get(config_key, "+250+150")
+        config_key  = "config_dialog_geom"
+        saved_geom  = self.app_config.get(config_key, "+250+150")
+        app_settings = self.app_config.get("app_settings", {})
 
-        border_frame = tk.Frame(dialog, bg=BORDER, padx=1, pady=1)
-        border_frame.pack(fill="both", expand=True)
-
-        main_frame = tk.Frame(border_frame, bg=BG_PANEL, padx=20, pady=20)
+        # ── window chrome ────────────────────────────────────────────────
+        outer_frame = tk.Frame(dialog, bg=BORDER, padx=1, pady=1)
+        outer_frame.pack(fill="both", expand=True)
+        main_frame = tk.Frame(outer_frame, bg=BG_PANEL)
         main_frame.pack(fill="both", expand=True)
-        main_frame.bind("<Button-1>", start_drag)
-        main_frame.bind("<B1-Motion>", do_drag)
 
-        top_bar = tk.Frame(main_frame, bg=BG_PANEL)
-        top_bar.pack(fill="x", pady=(0, 15))
-        top_bar.bind("<Button-1>", start_drag)
-        top_bar.bind("<B1-Motion>", do_drag)
-
-        title_label = tk.Label(top_bar, text="⚙ CONFIG", fg=CYAN, bg=BG_PANEL, font=("Consolas", 10, "bold"))
-        title_label.pack(side="left")
-        title_label.bind("<Button-1>", start_drag)
-        title_label.bind("<B1-Motion>", do_drag)
+        # title bar
+        title_bar = tk.Frame(main_frame, bg=BG_PANEL, padx=16, pady=10)
+        title_bar.pack(fill="x")
+        title_bar.bind("<Button-1>", start_drag)
+        title_bar.bind("<B1-Motion>", do_drag)
+        title_lbl = tk.Label(title_bar, text="⚙  CONFIG", fg=CYAN, bg=BG_PANEL,
+                             font=("Consolas", 11, "bold"))
+        title_lbl.pack(side="left")
+        title_lbl.bind("<Button-1>", start_drag)
+        title_lbl.bind("<B1-Motion>", do_drag)
 
         def close_dialog():
             try:
@@ -3310,174 +3362,210 @@ class MiningDashboard:
             self._enable_config_icon()
             dialog.destroy()
 
-        close_btn = tk.Label(top_bar, text="✕", fg=DIM, bg=BG_PANEL, font=("Consolas", 14, "bold"), cursor="hand2")
+        close_btn = tk.Label(title_bar, text="✕", fg=DIM, bg=BG_PANEL,
+                             font=("Consolas", 14, "bold"), cursor="hand2")
         close_btn.pack(side="right")
         close_btn.bind("<Button-1>", lambda e: close_dialog())
-        close_btn.bind("<Enter>", lambda e: close_btn.config(fg=RED))
-        close_btn.bind("<Leave>", lambda e: close_btn.config(fg=DIM))
+        close_btn.bind("<Enter>",    lambda e: close_btn.config(fg=RED))
+        close_btn.bind("<Leave>",    lambda e: close_btn.config(fg=DIM))
 
-        content_frame = tk.Frame(main_frame, bg=BG_PANEL)
-        content_frame.pack(fill="both", expand=True)
+        # thin line under title
+        tk.Frame(main_frame, bg=BORDER, height=1).pack(fill="x")
 
-        tk.Label(content_frame, text="◆ CHARACTER SELECTION", fg=CYAN, bg=BG_PANEL, font=("Consolas", 9, "bold")).pack(anchor="w", pady=(0, 5))
+        # body = sidebar + content
+        body = tk.Frame(main_frame, bg=BG_PANEL)
+        body.pack(fill="both", expand=True)
+
+        sidebar = tk.Frame(body, bg=BG, width=NAV_W)
+        sidebar.pack(side="left", fill="y")
+        sidebar.pack_propagate(False)
+        tk.Frame(body, bg=BORDER, width=1).pack(side="left", fill="y")
+
+        content_host = tk.Frame(body, bg=BG_PANEL)
+        content_host.pack(side="left", fill="both", expand=True)
+
+        # bottom bar
+        tk.Frame(main_frame, bg=BORDER, height=1).pack(fill="x")
+        bottom = tk.Frame(main_frame, bg=BG_PANEL, padx=16, pady=10)
+        bottom.pack(fill="x")
+
+        # ── SECTION: CHARACTERS ──────────────────────────────────────────
+        p_chars = tk.Frame(content_host, bg=BG_PANEL)
+        inner_chars = _make_scrollable(p_chars)
+
+        _section_label(inner_chars, "◆  ACTIVE CHARACTERS")
+        tk.Label(inner_chars,
+                 text="Choose which pilots are shown on the dashboard.",
+                 fg=DIM, bg=BG_PANEL, font=("Consolas", 8),
+                 wraplength=380, justify="left").pack(anchor="w", pady=(0, 10))
 
         visible_chars = self.app_config.get("visible_characters", [])
         if visible_chars is None: visible_chars = []
-
         char_vars = {}
 
-        # Add Select All / Deselect All controls
-        ctrl_frame = tk.Frame(content_frame, bg=BG_PANEL)
-        ctrl_frame.pack(fill="x", pady=(0, 5))
-
+        ctrl_frame = tk.Frame(inner_chars, bg=BG_PANEL)
+        ctrl_frame.pack(fill="x", pady=(0, 8))
         def set_all_chars(state):
-            for var in char_vars.values():
-                var.set(state)
+            for v in char_vars.values(): v.set(state)
+        tk.Button(ctrl_frame, text="SELECT ALL", command=lambda: set_all_chars(True),
+                  bg=BG, fg=CYAN, font=("Consolas", 8, "bold"),
+                  relief="flat", cursor="hand2", width=12).pack(side="left", padx=(0, 6))
+        tk.Button(ctrl_frame, text="DESELECT ALL", command=lambda: set_all_chars(False),
+                  bg=BG, fg=WHITE, font=("Consolas", 8, "bold"),
+                  relief="flat", cursor="hand2", width=12).pack(side="left")
 
-        tk.Button(ctrl_frame, text="SELECT ALL", command=lambda: set_all_chars(True), bg=BG, fg=CYAN, font=("Consolas", 8, "bold"), relief="flat", cursor="hand2", width=12).pack(side="left", padx=(0, 5))
-        tk.Button(ctrl_frame, text="DESELECT ALL", command=lambda: set_all_chars(False), bg=BG, fg=WHITE, font=("Consolas", 8, "bold"), relief="flat", cursor="hand2", width=12).pack(side="left")
-
-        checklist_outer = tk.Frame(content_frame, bg=BORDER, padx=1, pady=1)
-        checklist_outer.pack(fill="x", pady=(0, 15))
-        
-        char_canvas = tk.Canvas(checklist_outer, bg=BG, highlightthickness=0, height=100)
-        char_scrollbar = tk.Scrollbar(checklist_outer, orient="vertical", command=char_canvas.yview)
-        
-        checklist_frame = tk.Frame(char_canvas, bg=BG, padx=5, pady=5)
-        char_canvas.create_window((0, 0), window=checklist_frame, anchor="nw")
-        
-        def on_frame_configure(event): char_canvas.configure(scrollregion=char_canvas.bbox("all"))
-        checklist_frame.bind("<Configure>", on_frame_configure)
-        char_canvas.configure(yscrollcommand=char_scrollbar.set)
-        char_canvas.pack(side="left", fill="both", expand=True)
-        char_scrollbar.pack(side="right", fill="y")
-        
-        def _on_mousewheel(event): char_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        char_canvas.bind("<Enter>", lambda e: char_canvas.bind_all("<MouseWheel>", _on_mousewheel))
-        char_canvas.bind("<Leave>", lambda e: char_canvas.unbind_all("<MouseWheel>"))
-
-        num_chars = len(self.all_characters)
-        cols = 3 if num_chars > 8 else (2 if num_chars > 4 else 1)
-
+        grid_frame = tk.Frame(inner_chars, bg=BG_PANEL)
+        grid_frame.pack(fill="x")
+        grid_frame.columnconfigure(0, weight=1)
+        grid_frame.columnconfigure(1, weight=1)
         for i, (char_id, tracker) in enumerate(self.all_characters.items()):
             var = tk.BooleanVar(value=char_id in visible_chars)
             char_vars[char_id] = var
-            row = i // cols
-            col = i % cols
-            
-            cb_frame = tk.Frame(checklist_frame, bg=BG)
-            cb_frame.grid(row=row, column=col, sticky="w", padx=(0, 5), pady=0)
-            
-            cb = tk.Checkbutton(cb_frame, variable=var, bg=BG, activebackground=BG, selectcolor=WHITE, highlightthickness=0, bd=0, pady=0, padx=0)
-            cb.pack(side="left", padx=0, pady=0)
             accent = CHAR_ACCENTS[i % len(CHAR_ACCENTS)]
-            tk.Label(cb_frame, text=tracker.char_name, fg=accent, bg=BG, font=("Consolas", 10, "bold"), bd=0, pady=0, padx=0).pack(side="left", padx=0, pady=0)
+            cell = tk.Frame(grid_frame, bg=BG_CARD, padx=10, pady=8)
+            pad_l = 0 if i % 2 == 0 else 4
+            pad_r = 4 if i % 2 == 0 else 0
+            cell.grid(row=i//2, column=i%2, sticky="ew",
+                      padx=(pad_l, pad_r), pady=3)
+            tk.Frame(cell, bg=accent, width=3).pack(side="left", fill="y", padx=(0, 8))
+            cb = tk.Checkbutton(cell, variable=var, bg=BG_CARD,
+                                activebackground=BG_CARD, selectcolor=BG,
+                                highlightthickness=0, bd=0)
+            cb.pack(side="left")
+            tk.Label(cell, text=tracker.char_name, fg=accent, bg=BG_CARD,
+                     font=("Consolas", 10, "bold")).pack(side="left", padx=(4, 0))
 
-        tk.Label(content_frame, text="-" * 55, fg=BORDER, bg=BG_PANEL, font=("Consolas", 8)).pack(pady=8)
+        # ── SECTION: APPEARANCE ──────────────────────────────────────────
+        p_appearance = tk.Frame(content_host, bg=BG_PANEL)
+        inner_app = _make_scrollable(p_appearance)
 
-        fields_frame = tk.Frame(content_frame, bg=BG_PANEL)
-        fields_frame.pack(fill="x")
-        app_settings = self.app_config.get("app_settings", {})
+        _section_label(inner_app, "◆  PATHS & FILES")
+        c_paths = _card(inner_app)
+        docs_var = _field_row(c_paths, "Gamelogs Path:",
+                              app_settings.get("docs_path", DOCS), width=26)
 
-        def make_field(parent, row, label_text, default_value, width=35, note_text=None):
-            lbl = tk.Label(parent, text=label_text, fg=WHITE, bg=BG_PANEL, font=("Consolas", 9), anchor="w")
-            lbl.grid(row=row, column=0, sticky="w", pady=4, padx=(0, 10))
-            entry_frame = tk.Frame(parent, bg=BG_PANEL)
-            entry_frame.grid(row=row, column=1, sticky="w", pady=4)
-            var = tk.StringVar(value=str(default_value))
-            entry = tk.Entry(entry_frame, textvariable=var, width=width, font=("Consolas", 9), bg=BG, fg=WHITE, insertbackground=CYAN, relief="flat")
-            entry.pack(side="left")
-            if note_text:
-                note = tk.Label(entry_frame, text=note_text, fg=GOLD, bg=BG_PANEL, font=("Consolas", 9))
-                note.pack(side="left", padx=(8, 0))
-            return var
+        _sep(inner_app)
+        _section_label(inner_app, "◆  APPEARANCE")
+        c_appear = _card(inner_app)
 
-        tk.Label(fields_frame, text="◆ PATHS & FILES", fg=CYAN, bg=BG_PANEL, font=("Consolas", 9, "bold")).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
-        docs_var = make_field(fields_frame, 1, "Gamelogs Path:", app_settings.get("docs_path", DOCS), width=40)
-
-        tk.Label(fields_frame, text="-" * 55, fg=BORDER, bg=BG_PANEL, font=("Consolas", 8)).grid(row=2, column=0, columnspan=3, pady=8)
-        tk.Label(fields_frame, text="◆ APPEARANCE & LIMITS", fg=CYAN, bg=BG_PANEL, font=("Consolas", 9, "bold")).grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, 8))
-        
-        # New Theme Selector logic integrated here
-        tk.Label(fields_frame, text="Dashboard Theme:", fg=WHITE, bg=BG_PANEL, font=("Consolas", 9), anchor="w").grid(row=4, column=0, sticky="w", pady=4, padx=(0, 10))
+        # theme row
+        theme_row = tk.Frame(c_appear, bg=BG_CARD)
+        theme_row.pack(fill="x", pady=3)
+        tk.Label(theme_row, text="Dashboard Theme:", fg=DIM, bg=BG_CARD,
+                 font=("Consolas", 9), width=22, anchor="w").pack(side="left")
         theme_var = tk.StringVar(value=self.app_theme)
-        
-        # Advanced styling for the combobox to force dark UI even in readonly state
         style = ttk.Style()
-        style.theme_use('clam')
-        style.configure("Dark.TCombobox", fieldbackground=BG, background=BG_PANEL, foreground=WHITE, bordercolor=BORDER, arrowcolor=CYAN)
+        style.theme_use("clam")
+        style.configure("Dark.TCombobox", fieldbackground=BG, background=BG_PANEL,
+                        foreground=WHITE, bordercolor=BORDER, arrowcolor=CYAN)
         style.map("Dark.TCombobox",
                   fieldbackground=[("readonly", BG)],
                   foreground=[("readonly", WHITE)],
                   selectbackground=[("readonly", BORDER)],
                   selectforeground=[("readonly", CYAN)])
-                  
-        # Style the dropdown listbox itself
         self.root.option_add("*TCombobox*Listbox.background", BG)
         self.root.option_add("*TCombobox*Listbox.foreground", WHITE)
         self.root.option_add("*TCombobox*Listbox.selectBackground", BORDER)
         self.root.option_add("*TCombobox*Listbox.selectForeground", CYAN)
         self.root.option_add("*TCombobox*Listbox.font", ("Consolas", 9))
-        
-        theme_cb = ttk.Combobox(fields_frame, textvariable=theme_var, values=THEME_NAMES, state="readonly", style="Dark.TCombobox", font=("Consolas", 9), width=33)
-        theme_cb.grid(row=4, column=1, sticky="w", pady=4)
-        
-        interval_var = make_field(fields_frame, 5, "Update Interval (ms):", app_settings.get("update_interval_ms", UPDATE_INTERVAL_MS), width=10, note_text="min: 250")
-        history_var = make_field(fields_frame, 6, "Default History Days:", app_settings.get("history_days", HISTORY_DAYS), width=10)
+        theme_cb = ttk.Combobox(theme_row, textvariable=theme_var,
+                                values=THEME_NAMES, state="readonly",
+                                style="Dark.TCombobox",
+                                font=("Consolas", 9), width=26)
+        theme_cb.pack(side="left")
 
-        # Transparency slider — live, affects all open windows immediately
-        tk.Label(fields_frame, text="Window Transparency:", fg=WHITE, bg=BG_PANEL, font=("Consolas", 9), anchor="w").grid(row=7, column=0, sticky="w", pady=4, padx=(0, 10))
-        alpha_frame = tk.Frame(fields_frame, bg=BG_PANEL)
-        alpha_frame.grid(row=7, column=1, sticky="w", pady=4)
-        alpha_var = tk.DoubleVar(value=app_settings.get("win_alpha", WIN_ALPHA))
-        alpha_pct_var = tk.StringVar(value=f"{int(alpha_var.get() * 100)}%")
-        alpha_pct_label = tk.Label(alpha_frame, textvariable=alpha_pct_var, fg=CYAN, bg=BG_PANEL, font=("Consolas", 9), width=4, anchor="w")
-        alpha_pct_label.pack(side="right", padx=(6, 0))
+        history_var = _field_row(c_appear, "Default History Days:",
+                                 app_settings.get("history_days", HISTORY_DAYS), width=8)
+
+        # transparency
+        alpha_row = tk.Frame(c_appear, bg=BG_CARD)
+        alpha_row.pack(fill="x", pady=3)
+        tk.Label(alpha_row, text="Window Transparency:", fg=DIM, bg=BG_CARD,
+                 font=("Consolas", 9), width=22, anchor="w").pack(side="left")
+        alpha_var    = tk.DoubleVar(value=app_settings.get("win_alpha", WIN_ALPHA))
+        alpha_pct_var = tk.StringVar(value=f"{int(alpha_var.get()*100)}%")
         def on_alpha_change(val):
             v = float(val)
-            alpha_pct_var.set(f"{int(v * 100)}%")
+            alpha_pct_var.set(f"{int(v*100)}%")
             self._apply_alpha(v)
-        tk.Scale(alpha_frame, variable=alpha_var, from_=0.2, to=1.0, resolution=0.05,
+        tk.Scale(alpha_row, variable=alpha_var, from_=0.2, to=1.0, resolution=0.05,
                  orient="horizontal", length=160, command=on_alpha_change,
-                 bg=BG_PANEL, fg=WHITE, troughcolor=BG, highlightthickness=0,
-                 activebackground=CYAN, sliderrelief="flat", showvalue=False).pack(side="left")
+                 bg=BG_CARD, fg=WHITE, troughcolor=BG, highlightthickness=0,
+                 activebackground=CYAN, sliderrelief="flat",
+                 showvalue=False).pack(side="left")
+        tk.Label(alpha_row, textvariable=alpha_pct_var, fg=CYAN, bg=BG_CARD,
+                 font=("Consolas", 9), width=5).pack(side="left", padx=(6, 0))
 
-        # Sound Toggle Checkbox
+        # sound toggle
         crit_sound_var = tk.BooleanVar(value=app_settings.get("play_crit_sound", PLAY_CRIT_SOUND))
-        crit_cb = tk.Checkbutton(fields_frame, text="Play audio on Critical Hit", variable=crit_sound_var, bg=BG_PANEL, fg=WHITE, activebackground=BG_PANEL, activeforeground=WHITE, selectcolor=BG, highlightthickness=0, font=("Consolas", 9))
-        crit_cb.grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 0), padx=8)
+        sound_row = tk.Frame(c_appear, bg=BG_CARD)
+        sound_row.pack(fill="x", pady=(6, 0))
+        tk.Checkbutton(sound_row, variable=crit_sound_var, bg=BG_CARD,
+                       activebackground=BG_CARD, selectcolor=BG,
+                       highlightthickness=0).pack(side="left")
+        tk.Label(sound_row, text="Play audio on Critical Hit",
+                 fg=WHITE, bg=BG_CARD, font=("Consolas", 9)).pack(side="left", padx=(4, 0))
 
-        tk.Label(fields_frame, text="-" * 55, fg=BORDER, bg=BG_PANEL, font=("Consolas", 8)).grid(row=9, column=0, columnspan=3, pady=8)
-        tk.Label(fields_frame, text="◆ FLEET", fg=CYAN, bg=BG_PANEL, font=("Consolas", 9, "bold")).grid(row=9, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        # ── SECTION: FLEET ───────────────────────────────────────────────
+        p_fleet = tk.Frame(content_host, bg=BG_PANEL)
+        inner_fleet = _make_scrollable(p_fleet)
+
+        _section_label(inner_fleet, "◆  FLEET INTEGRATION")
+        tk.Label(inner_fleet,
+                 text="Paste a Discord webhook URL to broadcast mining stats to your fleet channel.",
+                 fg=DIM, bg=BG_PANEL, font=("Consolas", 8),
+                 wraplength=380, justify="left").pack(anchor="w", pady=(0, 10))
         fleet_cfg = self.app_config.get("fleet", {})
-        webhook_var = make_field(fields_frame, 10, "Webhook URL:", fleet_cfg.get("webhook_url", ""), width=40)
+        c_fleet = _card(inner_fleet)
+        webhook_var = _field_row(c_fleet, "Webhook URL:",
+                                 fleet_cfg.get("webhook_url", ""), width=34)
 
-        tk.Label(fields_frame, text="-" * 55, fg=BORDER, bg=BG_PANEL, font=("Consolas", 8)).grid(row=11, column=0, columnspan=3, pady=8)
-        tk.Label(fields_frame, text="◆ ORE DATABASE (SDE)", fg=CYAN, bg=BG_PANEL, font=("Consolas", 9, "bold")).grid(row=12, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        # ── SECTION: DATABASE ────────────────────────────────────────────
+        p_db = tk.Frame(content_host, bg=BG_PANEL)
+        inner_db = _make_scrollable(p_db)
 
-        sde_info_text = f"SDE: {SDE_INFO['version']}  |  {SDE_INFO['ore_count']} ores  |  {SDE_INFO['updated_at']}"
-        sde_info_var = tk.StringVar(value=sde_info_text)
-        sde_info_label = tk.Label(fields_frame, textvariable=sde_info_var, fg=DIM, bg=BG_PANEL, font=("Consolas", 8), anchor="w")
-        sde_info_label.grid(row=13, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        _section_label(inner_db, "◆  ORE DATABASE  (SDE)")
+        tk.Label(inner_db,
+                 text="The ore database is sourced from the EVE Static Data Export.\nUpdate it whenever CCP releases a new expansion.",
+                 fg=DIM, bg=BG_PANEL, font=("Consolas", 8),
+                 justify="left").pack(anchor="w", pady=(0, 10))
 
-        sde_status_var = tk.StringVar(value="")
-        sde_status_label = tk.Label(fields_frame, textvariable=sde_status_var, fg=GOLD, bg=BG_PANEL, font=("Consolas", 8), anchor="w")
-        sde_status_label.grid(row=14, column=0, columnspan=3, sticky="w")
+        info_card = _card(inner_db)
+        sde_info_var = tk.StringVar()
+        def _refresh_sde_label():
+            sde_info_var.set(
+                f"SDE: {SDE_INFO['version']}  |  {SDE_INFO['ore_count']} ores  |  {SDE_INFO['updated_at']}")
+        _refresh_sde_label()
+        for lbl_text, key in [("Version:", "version"), ("Ore types:", "ore_count"), ("Last updated:", "updated_at")]:
+            r = tk.Frame(info_card, bg=BG_CARD)
+            r.pack(fill="x", pady=2)
+            tk.Label(r, text=lbl_text, fg=DIM, bg=BG_CARD,
+                     font=("Consolas", 9), width=16, anchor="w").pack(side="left")
+            tk.Label(r, text=SDE_INFO[key], fg=WHITE, bg=BG_CARD,
+                     font=("Consolas", 9)).pack(side="left")
 
-        sde_bar_frame = tk.Frame(fields_frame, bg=BG_PANEL)
-        sde_bar_frame.grid(row=15, column=0, columnspan=3, sticky="ew", pady=(4, 2))
+        tk.Frame(inner_db, bg=BG_PANEL, height=8).pack()
+        sde_bar_frame = tk.Frame(inner_db, bg=BG_PANEL)
+        sde_bar_frame.pack(fill="x")
         sde_bar_border = tk.Frame(sde_bar_frame, bg=CYAN, padx=1, pady=1)
         sde_bar_border.pack(fill="x")
-        sde_bar_canvas = tk.Canvas(sde_bar_border, height=20, bg="#0a1520", highlightthickness=0)
+        sde_bar_canvas = tk.Canvas(sde_bar_border, height=18, bg="#0a1520", highlightthickness=0)
         sde_bar_canvas.pack(fill="x")
-        sde_bar_pct_label = tk.Label(sde_bar_frame, text="", fg=CYAN, bg=BG_PANEL, font=("Consolas", 8, "bold"), anchor="center")
+        sde_bar_pct_label = tk.Label(sde_bar_frame, text="", fg=CYAN, bg=BG_PANEL,
+                                     font=("Consolas", 8, "bold"), anchor="center")
         sde_bar_pct_label.pack(fill="x")
-        sde_bar_frame.grid_remove()
+        sde_bar_frame.pack_forget()
+
+        sde_status_var = tk.StringVar(value="")
+        tk.Label(inner_db, textvariable=sde_status_var, fg=GOLD, bg=BG_PANEL,
+                 font=("Consolas", 8)).pack(anchor="w", pady=(6, 0))
+
+        tk.Frame(inner_db, bg=BG_PANEL, height=10).pack()
 
         def do_sde_update():
             global ORE_VOLUMES, COMPRESSION_RATIOS, SDE_INFO
-            update_btn.config(state="disabled", text="↻ UPDATING...")
-            sde_bar_frame.grid()
+            update_btn.config(state="disabled", text="↻  UPDATING...")
+            sde_bar_frame.pack(fill="x")
             draw_neon_bar(sde_bar_canvas, 0)
             sde_bar_pct_label.config(text="")
 
@@ -3487,42 +3575,38 @@ class MiningDashboard:
                         try:
                             pct_match = SDE_PROGRESS_PCT.search(msg)
                             if pct_match:
-                                pct_val = int(pct_match.group('pct')) / 100.0
+                                pct_val = int(pct_match.group("pct")) / 100.0
                                 dialog.after(0, lambda p=pct_val, m=msg: _update_sde_progress(p, m))
                             elif "Extracting" in msg: dialog.after(0, lambda m=msg: _update_sde_progress(0.85, m))
-                            elif "Parsing" in msg: dialog.after(0, lambda m=msg: _update_sde_progress(0.95, m))
-                            else: dialog.after(0, lambda m=msg: _update_sde_progress(0.02, m))
+                            elif "Parsing"    in msg: dialog.after(0, lambda m=msg: _update_sde_progress(0.95, m))
+                            else:                     dialog.after(0, lambda m=msg: _update_sde_progress(0.02, m))
                         except Exception: pass
 
                     result = download_and_parse_sde(progress_callback=progress)
                     _save_ore_data_cache(result)
-
-                    ORE_VOLUMES = {k: float(v) for k, v in result["ore_volumes"].items()}
-                    COMPRESSION_RATIOS = {k: int(v) for k, v in result["compression_ratios"].items()}
-                    SDE_INFO["version"] = result.get("sde_version", "updated")
-                    SDE_INFO["updated_at"] = result.get("updated_at", "now")
+                    ORE_VOLUMES         = {k: float(v) for k, v in result["ore_volumes"].items()}
+                    COMPRESSION_RATIOS  = {k: int(v)   for k, v in result["compression_ratios"].items()}
+                    SDE_INFO["version"]   = result.get("sde_version", "updated")
+                    SDE_INFO["updated_at"]= result.get("updated_at", "now")
                     SDE_INFO["ore_count"] = str(result.get("ore_count", len(ORE_VOLUMES)))
 
                     def on_success():
-                        new_info = f"SDE: {SDE_INFO['version']}  |  {SDE_INFO['ore_count']} ores  |  {SDE_INFO['updated_at']}"
-                        sde_info_var.set(new_info)
                         sde_status_var.set(f"✔ Updated! {SDE_INFO['ore_count']} ores loaded.")
-                        sde_status_label.config(fg=GREEN)
+                        sde_status_label_ref[0].config(fg=GREEN)
                         draw_neon_bar(sde_bar_canvas, 1.0)
                         sde_bar_pct_label.config(text="100% ─ Complete!", fg=GREEN)
-                        update_btn.config(state="normal", text="↻ UPDATE ORE DATA")
-                        self._history_cache = None  # ore volumes changed, bust stale m³ totals
-
+                        update_btn.config(state="normal", text="↻  UPDATE ORE DATA")
+                        self._history_cache = None
                     try: dialog.after(0, on_success)
                     except Exception: pass
 
                 except Exception as e:
                     def on_error():
                         sde_status_var.set(f"✖ Error: {str(e)[:60]}")
-                        sde_status_label.config(fg=RED)
+                        sde_status_label_ref[0].config(fg=RED)
                         draw_neon_bar(sde_bar_canvas, 0, bar_color=RED)
                         sde_bar_pct_label.config(text="Download failed", fg=RED)
-                        update_btn.config(state="normal", text="↻ UPDATE ORE DATA")
+                        update_btn.config(state="normal", text="↻  UPDATE ORE DATA")
                     try: dialog.after(0, on_error)
                     except Exception: pass
 
@@ -3532,31 +3616,80 @@ class MiningDashboard:
             sde_status_var.set(msg)
             draw_neon_bar(sde_bar_canvas, pct_val)
             pct_display = int(pct_val * 100)
-            sde_bar_pct_label.config(text=f"{pct_display}%", fg=CYAN)
+            sde_bar_pct_label.config(text=f"{pct_display}%  ─  {msg[:40]}" if msg else f"{pct_display}%")
 
-        update_btn = tk.Button(fields_frame, text="↻ UPDATE ORE DATA", command=do_sde_update, bg=BG, fg=CYAN, font=("Consolas", 9, "bold"), relief="flat", cursor="hand2", width=20)
-        update_btn.grid(row=16, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        sde_status_label_ref = [
+            tk.Label(inner_db, textvariable=sde_status_var, fg=GOLD, bg=BG_PANEL,
+                     font=("Consolas", 8))
+        ]
+        update_btn = tk.Button(inner_db, text="↻  UPDATE ORE DATA",
+                               command=do_sde_update, bg=BG, fg=CYAN,
+                               font=("Consolas", 9, "bold"), relief="flat",
+                               cursor="hand2", pady=6, padx=12)
+        update_btn.pack(anchor="w")
 
-        btn_frame = tk.Frame(main_frame, bg=BG_PANEL)
-        btn_frame.pack(pady=(15, 0))
+        # ── NAV SIDEBAR ──────────────────────────────────────────────────
+        panels = {
+            "CHARACTERS": p_chars,
+            "APPEARANCE": p_appearance,
+            "FLEET":      p_fleet,
+            "DATABASE":   p_db,
+        }
+        nav_buttons   = {}
+        active_section = tk.StringVar(value="CHARACTERS")
 
-        # Dynamic theme preview — apply immediately on selection, config reopens in new theme
+        NAV_ITEMS = [
+            ("CHARACTERS", "◈"),
+            ("APPEARANCE", "◈"),
+            ("FLEET",      "◈"),
+            ("DATABASE",   "◈"),
+        ]
+
+        def show_section(name):
+            active_section.set(name)
+            for n, panel in panels.items():
+                panel.pack_forget()
+            panels[name].pack(fill="both", expand=True)
+            for n, nd in nav_buttons.items():
+                is_active = (n == name)
+                nd["btn"].config(fg=CYAN if is_active else DIM,
+                                 bg="#0f1e28" if is_active else BG)
+                nd["bar"].config(bg=CYAN if is_active else BG)
+
+        for name, icon in NAV_ITEMS:
+            nav_row = tk.Frame(sidebar, bg=BG)
+            nav_row.pack(fill="x")
+            bar = tk.Frame(nav_row, bg=BG, width=3)
+            bar.pack(side="left", fill="y")
+            btn = tk.Button(nav_row, text=f"{icon}  {name}", fg=DIM, bg=BG,
+                            font=("Consolas", 8, "bold"), relief="flat",
+                            cursor="hand2", anchor="w", pady=10,
+                            command=lambda n=name: show_section(n))
+            btn.pack(side="left", fill="both", expand=True)
+            btn.bind("<Enter>", lambda e, b=btn, n=name: b.config(
+                fg=WHITE if active_section.get() != n else CYAN))
+            btn.bind("<Leave>", lambda e, b=btn, n=name: b.config(
+                fg=CYAN if active_section.get() == n else DIM))
+            nav_buttons[name] = {"btn": btn, "bar": bar}
+            tk.Frame(sidebar, bg=BORDER, height=1).pack(fill="x")
+
+        show_section("CHARACTERS")
+
+        # ── THEME PREVIEW (live rebuild on selection) ─────────────────────
         def on_theme_preview(event=None):
             new_theme = theme_var.get()
             if new_theme == self.app_theme: return
-            try: interval_safe = max(250, int(interval_var.get()))
-            except: interval_safe = UPDATE_INTERVAL_MS
             try: history_safe = max(1, int(history_var.get()))
             except: history_safe = HISTORY_DAYS
             self.app_config["app_settings"] = {
                 "docs_path": docs_var.get().strip(), "crit_sound_file": CRIT_SOUND_FILE,
-                "update_interval_ms": interval_safe, "history_days": history_safe,
+                "update_interval_ms": UPDATE_INTERVAL_MS, "history_days": history_safe,
                 "max_modules": MAX_MODULES, "play_crit_sound": crit_sound_var.get(),
                 "win_alpha": float(alpha_var.get()),
             }
-            fleet_cfg_preview = self.app_config.get("fleet", {})
-            fleet_cfg_preview["webhook_url"] = webhook_var.get().strip()
-            self.app_config["fleet"] = fleet_cfg_preview
+            fleet_cfg_p = self.app_config.get("fleet", {})
+            fleet_cfg_p["webhook_url"] = webhook_var.get().strip()
+            self.app_config["fleet"] = fleet_cfg_p
             self.app_config["theme"] = new_theme
             self.app_theme = new_theme
             apply_theme_colors(new_theme)
@@ -3572,29 +3705,25 @@ class MiningDashboard:
 
         theme_cb.bind("<<ComboboxSelected>>", on_theme_preview)
 
+        # ── SAVE / CANCEL ────────────────────────────────────────────────
         def save_and_close():
             global DOCS, UPDATE_INTERVAL_MS, HISTORY_DAYS, PLAY_CRIT_SOUND, WIN_ALPHA
             try:
-                new_interval = int(interval_var.get())
-                if new_interval < 250: new_interval = 250
                 new_history = int(history_var.get())
                 if new_history < 1: new_history = 1
             except ValueError:
-                messagebox.showerror("Invalid Input", "Please enter valid numbers for numeric fields.")
+                messagebox.showerror("Invalid Input", "Please enter a valid number for history days.")
                 return
 
-            # Note: We must check for theme changes to trigger a rebuild
-            selected_theme = theme_var.get()
-            theme_changed = selected_theme != self.app_theme
-            
-            selected_chars = [char_id for char_id, var in char_vars.items() if var.get()]
+            selected_theme  = theme_var.get()
+            theme_changed   = selected_theme != self.app_theme
+            selected_chars  = [cid for cid, v in char_vars.items() if v.get()]
             self.save_visible_characters(selected_chars)
 
-            DOCS = docs_var.get().strip()
-            UPDATE_INTERVAL_MS = new_interval
-            HISTORY_DAYS = new_history
-            PLAY_CRIT_SOUND = crit_sound_var.get()
-            WIN_ALPHA = max(0.2, min(1.0, float(alpha_var.get())))
+            DOCS             = docs_var.get().strip()
+            HISTORY_DAYS     = new_history
+            PLAY_CRIT_SOUND  = crit_sound_var.get()
+            WIN_ALPHA        = max(0.2, min(1.0, float(alpha_var.get())))
             self._apply_alpha(WIN_ALPHA)
 
             self.app_config["app_settings"] = {
@@ -3603,14 +3732,12 @@ class MiningDashboard:
                 "max_modules": MAX_MODULES, "play_crit_sound": PLAY_CRIT_SOUND,
                 "win_alpha": WIN_ALPHA,
             }
-
             self.app_config["theme"] = selected_theme
-            self.app_theme = selected_theme
-
-            self.fleet_webhook_url = webhook_var.get().strip()
-            fleet_cfg = self.app_config.get("fleet", {})
-            fleet_cfg["webhook_url"] = self.fleet_webhook_url
-            self.app_config["fleet"] = fleet_cfg
+            self.app_theme           = selected_theme
+            self.fleet_webhook_url   = webhook_var.get().strip()
+            fleet_cfg_s = self.app_config.get("fleet", {})
+            fleet_cfg_s["webhook_url"] = self.fleet_webhook_url
+            self.app_config["fleet"] = fleet_cfg_s
             self.save_config()
             self._update_send_button_states()
 
@@ -3623,23 +3750,25 @@ class MiningDashboard:
             self.config_dialog = None
             self._enable_config_icon()
             dialog.destroy()
-            
-            # Rebuild UI if the theme changed
             if theme_changed:
                 apply_theme_colors(self.app_theme)
                 self.rebuild_all_ui()
 
-        tk.Button(btn_frame, text="✔ SAVE", command=save_and_close, bg=BG, fg=GREEN, font=("Consolas", 9, "bold"), relief="flat", cursor="hand2", width=10).pack(side="left", padx=5)
-        tk.Button(btn_frame, text="✕ CANCEL", command=close_dialog, bg=BG, fg=RED, font=("Consolas", 9, "bold"), relief="flat", cursor="hand2", width=10).pack(side="left", padx=5)
+        tk.Button(bottom, text="✔  SAVE", command=save_and_close,
+                  bg=BG, fg=GREEN, font=("Consolas", 9, "bold"),
+                  relief="flat", cursor="hand2", width=12, pady=4).pack(side="right", padx=(5, 0))
+        tk.Button(bottom, text="✕  CANCEL", command=close_dialog,
+                  bg=BG, fg=RED, font=("Consolas", 9, "bold"),
+                  relief="flat", cursor="hand2", width=12, pady=4).pack(side="right")
 
         dialog.update_idletasks()
         try:
-            if '+' in saved_geom:
-                parts = saved_geom.split('+')
-                if len(parts) >= 3: dialog.geometry(f"+{parts[1]}+{parts[2]}")
-                else: dialog.geometry("+250+150")
-            else: dialog.geometry("+250+150")
-        except Exception: dialog.geometry("+250+150")
+            if "+" in saved_geom:
+                parts = saved_geom.split("+")
+                if len(parts) >= 3: dialog.geometry(f"660x580+{parts[1]}+{parts[2]}")
+                else: dialog.geometry("660x580+250+150")
+            else: dialog.geometry("660x580+250+150")
+        except Exception: dialog.geometry("660x580+250+150")
         dialog.update()
 
         def initial_focus():
