@@ -3414,6 +3414,18 @@ class MiningDashboard:
                   bg=BG, fg=WHITE, font=("Consolas", 8, "bold"),
                   relief="flat", cursor="hand2", width=12).pack(side="left")
 
+        def _make_toggle(parent, var, bg):
+            """Custom checkbox — no tkinter Checkbutton flicker."""
+            box = tk.Label(parent, font=("Consolas", 12), cursor="hand2", bg=bg)
+            def _refresh():
+                box.config(text="■", fg=CYAN) if var.get() else box.config(text="□", fg=DIM)
+            def _toggle(e=None):
+                var.set(not var.get())
+                _refresh()
+            box.bind("<Button-1>", _toggle)
+            _refresh()
+            return box
+
         grid_frame = tk.Frame(inner_chars, bg=BG_PANEL)
         grid_frame.pack(fill="x")
         grid_frame.columnconfigure(0, weight=1)
@@ -3428,12 +3440,13 @@ class MiningDashboard:
             cell.grid(row=i//2, column=i%2, sticky="ew",
                       padx=(pad_l, pad_r), pady=3)
             tk.Frame(cell, bg=accent, width=3).pack(side="left", fill="y", padx=(0, 8))
-            cb = tk.Checkbutton(cell, variable=var, bg=BG_CARD,
-                                activebackground=BG_CARD, selectcolor=BG,
-                                highlightthickness=0, bd=0)
-            cb.pack(side="left")
-            tk.Label(cell, text=tracker.char_name, fg=accent, bg=BG_CARD,
-                     font=("Consolas", 10, "bold")).pack(side="left", padx=(4, 0))
+            box = _make_toggle(cell, var, BG_CARD)
+            box.pack(side="left", padx=(0, 4))
+            name_lbl = tk.Label(cell, text=tracker.char_name, fg=accent, bg=BG_CARD,
+                                font=("Consolas", 10, "bold"), cursor="hand2")
+            name_lbl.pack(side="left", padx=(4, 0))
+            # clicking the name also toggles — re-use the same box binding
+            name_lbl.bind("<Button-1>", lambda e, b=box: b.event_generate("<Button-1>"))
 
         # ── SECTION: APPEARANCE ──────────────────────────────────────────
         p_appearance = tk.Frame(content_host, bg=BG_PANEL)
@@ -3500,11 +3513,12 @@ class MiningDashboard:
         crit_sound_var = tk.BooleanVar(value=app_settings.get("play_crit_sound", PLAY_CRIT_SOUND))
         sound_row = tk.Frame(c_appear, bg=BG_CARD)
         sound_row.pack(fill="x", pady=(6, 0))
-        tk.Checkbutton(sound_row, variable=crit_sound_var, bg=BG_CARD,
-                       activebackground=BG_CARD, selectcolor=BG,
-                       highlightthickness=0).pack(side="left")
-        tk.Label(sound_row, text="Play audio on Critical Hit",
-                 fg=WHITE, bg=BG_CARD, font=("Consolas", 9)).pack(side="left", padx=(4, 0))
+        sound_box = _make_toggle(sound_row, crit_sound_var, BG_CARD)
+        sound_box.pack(side="left", padx=(0, 4))
+        sound_lbl = tk.Label(sound_row, text="Play audio on Critical Hit",
+                             fg=WHITE, bg=BG_CARD, font=("Consolas", 9), cursor="hand2")
+        sound_lbl.pack(side="left", padx=(4, 0))
+        sound_lbl.bind("<Button-1>", lambda e: sound_box.event_generate("<Button-1>"))
 
         # ── SECTION: FLEET ───────────────────────────────────────────────
         p_fleet = tk.Frame(content_host, bg=BG_PANEL)
