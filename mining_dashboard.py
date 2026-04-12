@@ -3290,20 +3290,37 @@ class MiningDashboard:
             return var
 
         def _make_scrollable(parent):
-            canvas = tk.Canvas(parent, bg=BG_PANEL, highlightthickness=0, bd=0)
-            sb = tk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+            inner = tk.Frame(parent, bg=BG_PANEL, padx=18, pady=14)
+            inner.pack(fill="both", expand=True)
+            return inner
+
+        def _make_char_scrollable(parent):
+            """Fixed-height scrollable list for CHARACTERS.
+            Scrollbar drag/click only — zero mousewheel binding to avoid global interference."""
+            style = ttk.Style()
+            style.configure("Slim.Vertical.TScrollbar",
+                            background=BORDER, troughcolor=BG,
+                            arrowcolor=DIM, bordercolor=BG, relief="flat")
+            outer = tk.Frame(parent, bg=BG_PANEL, padx=18, pady=14)
+            outer.pack(fill="both", expand=True)
+            canvas = tk.Canvas(outer, bg=BG_PANEL, highlightthickness=0, bd=0, height=340)
+            sb = ttk.Scrollbar(outer, orient="vertical",
+                               command=canvas.yview, style="Slim.Vertical.TScrollbar")
             canvas.configure(yscrollcommand=sb.set)
-            inner = tk.Frame(canvas, bg=BG_PANEL, padx=18, pady=14)
+            inner = tk.Frame(canvas, bg=BG_PANEL)
             win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
             def _resize(e): canvas.itemconfig(win_id, width=e.width)
-            def _scroll_region(e): canvas.configure(scrollregion=canvas.bbox("all"))
+            def _scroll(e): canvas.configure(scrollregion=canvas.bbox("all"))
             canvas.bind("<Configure>", _resize)
-            inner.bind("<Configure>", _scroll_region)
-            canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>",
-                lambda ev: canvas.yview_scroll(int(-1*(ev.delta/120)), "units")))
-            canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+            inner.bind("<Configure>", _scroll)
             canvas.pack(side="left", fill="both", expand=True)
-            sb.pack(side="right", fill="y")
+            # scrollbar only shown when content exceeds the canvas height
+            def _maybe_show_sb(e):
+                if inner.winfo_reqheight() > canvas.winfo_height():
+                    sb.pack(side="right", fill="y")
+                else:
+                    sb.pack_forget()
+            inner.bind("<Configure>", lambda e: [_scroll(e), _maybe_show_sb(e)])
             return inner
 
         # ── constants ────────────────────────────────────────────────────
@@ -3391,7 +3408,7 @@ class MiningDashboard:
 
         # ── SECTION: CHARACTERS ──────────────────────────────────────────
         p_chars = tk.Frame(content_host, bg=BG_PANEL)
-        inner_chars = _make_scrollable(p_chars)
+        inner_chars = _make_char_scrollable(p_chars)
 
         _section_label(inner_chars, "◆  ACTIVE CHARACTERS")
         tk.Label(inner_chars,
