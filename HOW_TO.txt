@@ -1,82 +1,164 @@
 ## How to Use EVE Mining Dashboard
 
-### Managing Characters
 
-Your characters will be detected automatically from existing game logs.
-Click the **gear icon** (⚙) in the top-right corner to open the Config dialog.
+### Managing Characters & Config
 
-- Check or uncheck characters to show or hide them on the main dashboard hub.
-- Adjust the **Gamelogs Path** if your EVE logs are in a non-default location.
-- Set the **Update Interval** (how often the dashboard reads new log data, minimum 250 ms).
-- Set the **Default History Days** for the history window.
-- Click the **UPDATE ORE DATA** button to fetch the latest EVE Online SDE ore volumes and compression ratios.
+Your characters are detected automatically from your EVE game logs.
+Click the gear icon (⚙) in the top-right corner of the hub to open the Config dialog.
+
+The Config dialog is organized into four sections accessible from the left sidebar:
+
+  ◈ CHARACTERS
+    - Check or uncheck pilots to show or hide them on the dashboard.
+    - Use SELECT ALL / DESELECT ALL to quickly toggle all at once.
+
+  ◈ APPEARANCE
+    - Gamelogs Path    : Change this if your EVE logs are in a non-default location.
+    - Default History Days : How many days back the History window analyzes by default.
+    - Dashboard Theme  : Choose from 20+ EVE faction colour themes. Selecting one applies it immediately.
+    - Window Transparency : Slider to set the opacity of all dashboard windows (20%–100%).
+    - Play audio on Critical Hit : Toggle the audio alert on critical mining successes.
+
+  ◈ FLEET
+    - Webhook URL : Paste a Discord webhook URL to enable fleet reporting (see Fleet Mode below).
+
+  ◈ DATABASE
+    - Displays the current ore database version, ore count, and last update timestamp.
+    - Click UPDATE ORE DATA to download the latest EVE SDE ore volumes and compression ratios.
+
+Click SAVE to apply all changes, or CANCEL to discard.
 
 
-### Detachable Character Frames (NEW)
+### Main Window Controls
 
-You can pop individual characters out of the main dashboard to freely arrange them on your screen:
+The main dashboard is a floating control hub. The title bar contains:
 
-- **Detach:** Click the pop-out icon (⇱) next to the character's profile name. The character will move into its own floating window.
-- **Move:** Click and drag the custom title bar (e.g., `★ JF GELINAS`) at the top of the detached window.
-- **Resize:** Click and drag the small resize grip (◢) in the bottom right corner of the detached window.
-- **Auto-Fit:** Double-click the custom title bar to instantly snap the window back to its default, perfectly fitted size.
-- **Session Breakdown (Accordion):** Click the `v SESSION BREAKDOWN v` button at the bottom of the frame to expand/collapse the detailed ore stats. 
-- **Re-attach:** Click the close button (✕) on the detached window's title bar, or click the re-attach icon (⇲).
-- **Persistence:** The app will automatically remember which characters are detached, along with their exact window sizes and screen coordinates, the next time you launch it!
+  - Pin (📌)         — Toggles always-on-top for the hub. Lit (cyan) = pinned.
+  - Config (⚙)       — Opens the Config dialog.
+  - Minimize (–)     — Sends the dashboard to the system tray.
+  - Close (✕)        — Exits the application completely.
+  - Resize grip (◢)  — Drag the bottom-right corner to resize the hub window.
+  - Double-click title bar — Rolls the window up to just the title bar (window shade).
+                             Double-click again to restore.
+
+
+### System Tray
+
+When minimized, the dashboard lives in your system tray (bottom-right taskbar).
+
+  - Left-click  the tray icon → restore the dashboard.
+  - Right-click the tray icon → Show Dashboard  /  EXIT.
+
+
+### Character Fleet Hub
+
+Each character enabled in Config gets their own floating window when the dashboard launches.
+The hub displays your ACTIVE MINING FLEET roster:
+
+  - ◉ HIDE — Temporarily hides a character's floating window without removing them from the fleet.
+             Useful for clearing screen space while still tracking them.
+  - ◉ SHOW — Brings back a previously hidden character's floating window.
+
+To permanently remove a character from the fleet, uncheck them in ⚙ Config.
+
+
+### Character Frames (Floating Windows)
+
+Each character has an independent always-on-top floating window.
+
+  - Move        : Click and drag the title bar (e.g. "★ JF GELINAS") to reposition.
+  - Resize      : Drag the small resize grip (◢) in the bottom-right corner.
+  - Auto-Fit    : Double-click the title bar to snap back to the default fitted size.
+  - Hide        : Click ✕ on the title bar to hide the window (stays in the fleet).
+                  Use ◉ SHOW in the hub to bring it back.
+  - Session Breakdown : Click "v SESSION BREAKDOWN v" at the bottom to expand/collapse
+                        the per-ore-type stats for the current session.
+  - Persistence : Window sizes and positions are saved automatically and restored on next launch.
 
 
 ### Configuring Ship Fittings
 
-Right-click anywhere on a character's column (or inside their detached frame) and select **⚙ Ship Config** to open the fitting dialog.
+Right-click anywhere on a character's floating window and select ⚙ Ship Config.
 
-- **Profiles:** Create multiple ship profiles (e.g., one for ore mining, one for ice, one for gas) using the `+ NEW`, `✎ RENAME`, and `✕ DELETE` buttons. Use the dropdown to switch between them. (You can also switch profiles quickly by clicking the gold `<Profile>` text directly on the dashboard).
-- **Modules:** Configure up to 5 mining modules per profile. For each module, enter:
-  - **Module Name** -- a label for your reference (e.g., "Strip Miner I")
-  - **Yield (m3/cycle)** -- the m3 your module extracts per cycle (check your fitting window in EVE)
-  - **Cycle Time (s)** -- the duration of one mining cycle in seconds
-- **Drones:** Configure active mining drones, their yield, and cycle time.
-- **Implant:** Toggle the Highwall MX-1005 implant for a +5% module yield boost.
-- **Cargo Hold:** Set your ship's capacity to enable the visual cargo progress bar and time-to-full estimates.
-- **Enable/Disable:** Use the checkboxes to toggle individual modules on or off. The **Theoretical rate** preview updates live. Click **SAVE** to apply.
+  Profiles
+    Create multiple ship profiles (e.g. "Ore Barge", "Ice Miner", "Gas Huffer") using the
+    + NEW, ✎ RENAME, and ✕ DELETE buttons. Switch between them via the dropdown, or click
+    the gold profile name directly on the character frame.
+
+  Modules
+    Configure up to 5 mining modules per profile. For each:
+      - Module Name    : A label for your reference (e.g. "Strip Miner I")
+      - Yield (m3/cycle) : How many m3 the module extracts per cycle (check your fitting window in EVE)
+      - Cycle Time (s) : Duration of one cycle in seconds
+    Use the checkboxes to enable/disable individual modules. The Theoretical rate preview updates live.
+
+  Drones
+    Configure active mining drones — their individual yield and cycle time.
+
+  Implant
+    Toggle the Highwall MX-1005 implant for a +5% module yield boost.
+
+  Cargo Hold
+    Set your ship's cargo capacity to enable the cargo progress bar and time-to-full estimates.
+    When you compress ore in-space, the bar automatically adjusts to reflect the reduced volume.
+
+  Click SAVE to apply the fitting.
 
 
-### Start Monitoring
+### Starting a Session
 
-1. Set up your ship fitting and ensure your character is visible/detached where you want them.
-2. Click **▶ START** under a character's column to begin tracking that session.
-3. Mine as usual in EVE — stats, crits, cargo bars, and the actual m3/s rate will update in real time.
-4. Click the **v SESSION BREAKDOWN v** toggle to see exactly how much of each ore you have mined.
-5. Click **■ STOP** to pause tracking, or **↺ RESET** to clear all stats and cargo for that character.
-6. Click **⏏ EMPTY** to reset just the cargo progress bar while keeping your session stats intact.
+  1. Set up your ship fitting and position the character window where you want it on screen.
+  2. Click ▶ START on a character's frame to begin tracking.
+  3. Mine as usual in EVE — stats, critical hits, cargo bar, and actual m3/s rate update in real time.
+  4. The Residue stat tracks ore volume lost to compression residue.
+  5. Click "v SESSION BREAKDOWN v" to see the per-ore detail.
+  6. Click ■ STOP to pause tracking without clearing data.
+  7. Click ↺ RESET to clear all session stats and cargo for that character.
+  8. Click ⏏ EMPTY to reset only the cargo bar while keeping all session stats intact.
+
+  Auto-Pause:
+    The session pauses automatically (returns to ▶ START) when EVE logs any of:
+      - Your cargo hold is full
+      - The asteroid you are mining is depleted
+      - A targeting attempt failed (object no longer present)
+    Simply click ▶ START again to resume after repositioning or switching rocks.
+
+
+### Compression & Cargo Tracking
+
+When you compress ore in-space, the dashboard detects the compression event from your logs and
+automatically adjusts the cargo bar:
+  - The raw (uncompressed) volume is removed.
+  - The compressed volume is added back (raw / compression ratio).
+  - Net result: the bar drops significantly but does NOT go to zero — it reflects what is actually
+    in your hold after compression.
 
 
 ### Fleet Mode & Discord Reporting
 
-Fleet Mode lets you report mining session statistics directly to a Discord channel via webhook.
-
-1. Open **⚙ Config** and paste your Discord webhook URL into the **Webhook URL** field under the Fleet section.
-2. Once you have active mining data for a session, two buttons will become available for that character:
-   - **⎘ Copy to Clipboard:** Copies a plain-text session report (duration, crits, total m3, and ore breakdown).
-   - **▲ Send to Discord:** Opens a preview dialog and posts the report directly to your Discord server.
+  1. Open ⚙ Config → FLEET and paste your Discord webhook URL.
+  2. Once a session has active data, two buttons appear on the character frame:
+       - ⎘ Copy to Clipboard : Copies a plain-text report (duration, crits, total m3, ore breakdown).
+       - ▲ Send to Discord   : Opens a preview, then posts the report to your Discord server.
 
 
 ### Viewing Mining History
 
-Click the **◈ HISTORY** button at the bottom of the main dashboard.
+Click the ◈ HISTORY button at the bottom of the main hub.
 
-- Enter the number of days to analyze and press Enter or click **↻ REFRESH STATS**.
-- The history window shows total m3 mined per character with a per-ore breakdown based on your saved logs.
-- **◈ EXPORT EXCEL:** Click this to generate a comprehensive `.xlsx` file containing a Summary sheet, Ore Pivot tables, and Daily breakdowns for each character.
+  - Enter the number of days to analyze and press Enter or click ↻ REFRESH STATS.
+  - The history window shows total m3 mined per character with a per-ore breakdown from your saved logs.
+  - ◈ EXPORT EXCEL : Generates a .xlsx file with a Summary sheet, Ore Pivot tables, and daily
+                     breakdowns for each character.
 
 
 ### Configuration File
 
-Settings are saved automatically to `mining_config.json` in the same folder as the script. This includes:
+All settings are saved automatically to mining_config.json in the same folder as the script:
 
-- All window positions and geometries (Main Dashboard, History, Config, and *each individual Detached Frame*).
-- Which frames are currently detached.
-- Character visibility selections.
-- All ship profiles, modules, drones, and cargo configurations.
-- Application settings (paths, intervals, webhooks).
+  - Window positions and sizes (hub, history, config, and each character frame)
+  - Character visibility selections and hidden states
+  - All ship profiles, modules, drones, implant, and cargo configurations
+  - Application settings (log path, webhook, theme, sound toggle, transparency)
 
-*Note: Delete `mining_config.json` if you ever need to completely reset the application to its default state.*
+Note: Delete mining_config.json to completely reset the application to its default state.
