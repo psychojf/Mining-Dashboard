@@ -400,7 +400,7 @@ def _save_ore_data_cache(data):
     except Exception as e: print(f"Warning: could not save ore data cache: {e}")
 
 def _load_esi_price_cache() -> bool:
-    """Load ESI prices from disk. Returns True if cache is fresh (< 24 h old)."""
+    """Load ESI prices (and cached type IDs) from disk. Returns True if cache is fresh (< 24 h old)."""
     global _esi_prices
     try:
         if not os.path.exists(ESI_PRICE_CACHE_FILE):
@@ -417,24 +417,40 @@ def _load_esi_price_cache() -> bool:
         prices = {int(k): float(v) for k, v in data.get("prices", {}).items()}
         with _esi_cache_lock:
             _esi_prices = prices
+        # Also restore any previously resolved ore type IDs
+        resolved = {k: int(v) for k, v in data.get("resolved_type_ids", {}).items()}
+        if resolved:
+            ORE_TYPE_IDS.update(resolved)
         return age_hours < ESI_PRICE_CACHE_TTL_HOURS
     except Exception as e:
         print(f"Warning: could not load ESI price cache: {e}")
         return False
 
-def _save_esi_price_cache(prices: Dict[int, float]) -> None:
+def _save_esi_price_cache(prices: Dict[int, float], resolved_ids: Optional[Dict[str, int]] = None) -> None:
     try:
-        data = {
+        data: Dict = {
             "cached_at": datetime.now(timezone.utc).isoformat(),
             "prices": {str(k): v for k, v in prices.items()},
         }
+        if resolved_ids:
+            data["resolved_type_ids"] = {k: v for k, v in resolved_ids.items()}
+        elif os.path.exists(ESI_PRICE_CACHE_FILE):
+            # Preserve any previously saved resolved IDs when only refreshing prices
+            try:
+                with open(ESI_PRICE_CACHE_FILE, "r", encoding="utf-8") as f:
+                    old = json.load(f)
+                if "resolved_type_ids" in old:
+                    data["resolved_type_ids"] = old["resolved_type_ids"]
+            except Exception:
+                pass
         with open(ESI_PRICE_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f)
     except Exception as e:
         print(f"Warning: could not save ESI price cache: {e}")
 
 def _fetch_esi_prices_from_api() -> Dict[int, float]:
-    """Fetch aggregate prices from ESI. No auth required. Returns {type_id: adjusted_price}."""
+    """Fetch aggregate prices from ESI. No auth required. Returns {type_id: best_price}.
+    Uses adjusted_price when available, falls back to average_price for newer items."""
     url = "https://esi.evetech.net/latest/markets/prices/?datasource=tranquility"
     req = urllib.request.Request(
         url,
@@ -442,24 +458,69 @@ def _fetch_esi_prices_from_api() -> Dict[int, float]:
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
         items = json.loads(resp.read().decode("utf-8"))
-    return {
-        int(item["type_id"]): float(item.get("adjusted_price", 0.0))
-        for item in items
-        if item.get("adjusted_price")
-    }
+    result: Dict[int, float] = {}
+    for item in items:
+        price = float(item.get("adjusted_price") or item.get("average_price") or 0.0)
+        if price > 0:
+            result[int(item["type_id"])] = price
+    return result
+
+def _resolve_ore_type_ids_from_esi() -> Dict[str, int]:
+    """POST all known ore/gas/ice names to ESI /universe/ids/ to get their type IDs.
+    Only resolves names that are not already in ORE_TYPE_IDS."""
+    all_names = set(_DEFAULT_ORE_VOLUMES.keys()) | set(_DEFAULT_COMPRESSION_RATIOS.keys())
+    need = sorted(n for n in all_names if n not in ORE_TYPE_IDS)
+    if not need:
+        return {}
+    url = "https://esi.evetech.net/latest/universe/ids/?datasource=tranquility"
+    resolved: Dict[str, int] = {}
+    for i in range(0, len(need), 500):
+        batch = need[i:i + 500]
+        body = json.dumps(batch).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=body,
+            headers={
+                "User-Agent": "EVE-Mining-Dashboard/1.0",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        for item in data.get("inventory_types", []):
+            resolved[item["name"]] = int(item["id"])
+    return resolved
 
 def _esi_price_thread_worker() -> None:
-    """Daemon thread: load cache on start, refresh every 24 h silently."""
-    global _esi_prices
+    """Daemon thread: load cache on start, resolve ore type IDs, refresh prices every 24 h."""
+    global _esi_prices, _esi_ids_resolved
     is_fresh = _load_esi_price_cache()
+
+    # Resolve ore/gas/ice type IDs via ESI if any are missing
+    resolved_ids: Dict[str, int] = {}
+    try:
+        resolved_ids = _resolve_ore_type_ids_from_esi()
+        if resolved_ids:
+            ORE_TYPE_IDS.update(resolved_ids)
+    except Exception as e:
+        print(f"Warning: ESI type ID resolution failed: {e}")
+    finally:
+        _esi_ids_resolved = True   # mark done regardless of success/failure
+
     if not is_fresh:
         try:
             prices = _fetch_esi_prices_from_api()
             with _esi_cache_lock:
                 _esi_prices = prices
-            _save_esi_price_cache(prices)
+            _save_esi_price_cache(prices, resolved_ids if resolved_ids else None)
         except Exception as e:
             print(f"Warning: initial ESI price fetch failed: {e}")
+    elif resolved_ids:
+        # Prices were fresh from cache but we just resolved new IDs — persist them
+        with _esi_cache_lock:
+            prices_snapshot = dict(_esi_prices)
+        _save_esi_price_cache(prices_snapshot, resolved_ids)
+
     while True:
         time.sleep(ESI_PRICE_CACHE_TTL_HOURS * 3600)
         try:
@@ -597,6 +658,7 @@ ORE_TYPE_IDS: Dict[str, int] = dict(_ORE_TYPE_ID_FALLBACK)  # extended from SDE 
 
 _esi_prices: Dict[int, float] = {}          # type_id → adjusted_price ISK/unit
 _esi_cache_lock = threading.Lock()
+_esi_ids_resolved: bool = False             # True once the /universe/ids resolution attempt finishes
 
 _cached = _load_ore_data_from_cache()
 if _cached and "ore_volumes" in _cached:
@@ -2706,9 +2768,9 @@ class MiningDashboard:
             # ISK/hour — live ESI-priced value estimate
             isk_per_hour = self._get_isk_per_hour(tracker)
             if isk_per_hour is not None:
-                w['isk'].config(text=f"◈ Value: {isk_per_hour:,.0f} ISK/h")
+                w['isk'].config(text=f"◈ Value: {isk_per_hour / 1_000_000:.2f} M ISK/h")
             else:
-                w['isk'].config(text="◈ Value: -- ISK/h")
+                w['isk'].config(text=self._get_isk_status_hint(tracker))
 
         # ── START ALL / STOP ALL button sync ───────────────────────────────────
         self._refresh_start_all_btn()
@@ -2779,6 +2841,30 @@ class MiningDashboard:
         else:
             btn.config(text="▶ START ALL", fg=GREEN)
 
+    def _get_isk_status_hint(self, tracker: "CharacterTracker") -> str:
+        """Return a diagnostic label string explaining why ISK/h is unavailable."""
+        with _esi_cache_lock:
+            has_prices = bool(_esi_prices)
+        if not has_prices:
+            return "◈ Value: -- ISK/h  [fetching prices...]"
+        if not tracker.ore_summary:
+            return "◈ Value: -- ISK/h  [no ore yet]"
+        if tracker.get_session_active_duration() < 10:
+            return "◈ Value: -- ISK/h  [session < 10s]"
+        if not _esi_ids_resolved:
+            return "◈ Value: -- ISK/h  [resolving ore IDs...]"
+        # IDs resolved but still no match — name the first unpriced ore so it's obvious
+        with _esi_cache_lock:
+            prices = dict(_esi_prices)
+        missing = next(
+            (name for name in tracker.ore_summary if ORE_TYPE_IDS.get(name) is None
+             or prices.get(ORE_TYPE_IDS[name], 0) == 0),
+            None
+        )
+        if missing:
+            return f"◈ Value: -- ISK/h  [no price: {missing}]"
+        return "◈ Value: -- ISK/h  [no price data]"
+
     def _get_isk_per_hour(self, tracker: "CharacterTracker") -> Optional[float]:
         """Return estimated ISK/h for the current session ore mix, or None if unavailable."""
         with _esi_cache_lock:
@@ -2788,7 +2874,11 @@ class MiningDashboard:
 
         total_isk = 0.0
         total_m3 = 0.0
-        grade_suffixes = [" IV-Grade", " III-Grade", " II-Grade", " 0-Grade"]
+        # Full suffix list — handles both "II-Grade" and shorthand "II" from some log formats
+        grade_suffixes = [
+            " IV-Grade", " III-Grade", " II-Grade", " 0-Grade",
+            " IV", " III", " II", " I",
+        ]
 
         for ore_name, ore_m3 in tracker.ore_summary.items():
             type_id = ORE_TYPE_IDS.get(ore_name)
@@ -4128,7 +4218,7 @@ class MiningDashboard:
 
         isk_per_hour = self._get_isk_per_hour(tracker)
         if isk_per_hour is not None:
-            lines.append(f"Value: {isk_per_hour:,.0f} ISK/h  (ESI adjusted price)")
+            lines.append(f"Value: {isk_per_hour / 1_000_000:.2f} M ISK/h  (ESI adjusted price)")
 
         return "\n".join(lines)
 
