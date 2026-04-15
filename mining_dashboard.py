@@ -218,7 +218,7 @@ def draw_neon_bar(canvas, pct, bar_color=None, glow=True, segments=True):
 
 # ---------------------------------------------------------------------------
 # ORE / ICE / GAS DATA  (SDE-aware, auto-updatable)
-# Source: EVE Online SDE build 3294658 (Apr 12, 2026)
+# Source: EVE Online SDE build 3300615 (Apr 15, 2026)
 # ---------------------------------------------------------------------------
 ORE_DATA_CACHE_FILE = "ore_data_cache.json"
 SDE_LATEST_URL = "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip"
@@ -230,7 +230,7 @@ SDE_SKIP_GROUPS = {
     "AIR Ore Asteroid Resources"
 }
 
-# Source: EVE Online SDE build 3294658 (Apr 12, 2026)
+# Source: EVE Online SDE build 3300615 (Apr 15, 2026)
 # To update before building the exe, run ore_data.py and copy its _SEED_VOLUMES /
 # _build_seed_ratios() output into these two dicts.
 _DEFAULT_ORE_VOLUMES: Dict[str, float] = {
@@ -399,6 +399,77 @@ def _save_ore_data_cache(data):
             json.dump(data, f, indent=2, ensure_ascii=False)
     except Exception as e: print(f"Warning: could not save ore data cache: {e}")
 
+def _load_esi_price_cache() -> bool:
+    """Load ESI prices from disk. Returns True if cache is fresh (< 24 h old)."""
+    global _esi_prices
+    try:
+        if not os.path.exists(ESI_PRICE_CACHE_FILE):
+            return False
+        with open(ESI_PRICE_CACHE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        cached_at_str = data.get("cached_at", "")
+        if not cached_at_str:
+            return False
+        cached_at = datetime.fromisoformat(cached_at_str)
+        if cached_at.tzinfo is None:
+            cached_at = cached_at.replace(tzinfo=timezone.utc)
+        age_hours = (datetime.now(timezone.utc) - cached_at).total_seconds() / 3600
+        prices = {int(k): float(v) for k, v in data.get("prices", {}).items()}
+        with _esi_cache_lock:
+            _esi_prices = prices
+        return age_hours < ESI_PRICE_CACHE_TTL_HOURS
+    except Exception as e:
+        print(f"Warning: could not load ESI price cache: {e}")
+        return False
+
+def _save_esi_price_cache(prices: Dict[int, float]) -> None:
+    try:
+        data = {
+            "cached_at": datetime.now(timezone.utc).isoformat(),
+            "prices": {str(k): v for k, v in prices.items()},
+        }
+        with open(ESI_PRICE_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"Warning: could not save ESI price cache: {e}")
+
+def _fetch_esi_prices_from_api() -> Dict[int, float]:
+    """Fetch aggregate prices from ESI. No auth required. Returns {type_id: adjusted_price}."""
+    url = "https://esi.evetech.net/latest/markets/prices/?datasource=tranquility"
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "EVE-Mining-Dashboard/1.0", "Accept": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        items = json.loads(resp.read().decode("utf-8"))
+    return {
+        int(item["type_id"]): float(item.get("adjusted_price", 0.0))
+        for item in items
+        if item.get("adjusted_price")
+    }
+
+def _esi_price_thread_worker() -> None:
+    """Daemon thread: load cache on start, refresh every 24 h silently."""
+    global _esi_prices
+    is_fresh = _load_esi_price_cache()
+    if not is_fresh:
+        try:
+            prices = _fetch_esi_prices_from_api()
+            with _esi_cache_lock:
+                _esi_prices = prices
+            _save_esi_price_cache(prices)
+        except Exception as e:
+            print(f"Warning: initial ESI price fetch failed: {e}")
+    while True:
+        time.sleep(ESI_PRICE_CACHE_TTL_HOURS * 3600)
+        try:
+            prices = _fetch_esi_prices_from_api()
+            with _esi_cache_lock:
+                _esi_prices = prices
+            _save_esi_price_cache(prices)
+        except Exception as e:
+            print(f"Warning: ESI price refresh failed: {e}")
+
 # Analyse les fichiers JSONL du SDE pour extraire les volumes et ratios de compression des minerais
 def _parse_sde_ore_data(sde_dir):
     categories = {}
@@ -437,6 +508,7 @@ def _parse_sde_ore_data(sde_dir):
 
     ore_volumes = {}
     compression_ratios = {}
+    ore_type_ids = {}
     for tid, t in types_by_id.items():
         if not t.get("published"): continue
         name = t.get("name", {}).get("en", "")
@@ -452,6 +524,7 @@ def _parse_sde_ore_data(sde_dir):
                 if cv > 0: comp_ratio = round(vol / cv)
         ore_volumes[name] = vol
         compression_ratios[name] = comp_ratio
+        ore_type_ids[name] = int(tid)
 
     sde_version = ""
     sde_meta = os.path.join(sde_dir, "_sde.jsonl")
@@ -466,7 +539,8 @@ def _parse_sde_ore_data(sde_dir):
         "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "ore_count": len(ore_volumes),
         "ore_volumes": ore_volumes,
-        "compression_ratios": compression_ratios
+        "compression_ratios": compression_ratios,
+        "type_ids": ore_type_ids,
     }
 
 # Télécharge le SDE de CCP, extrait les fichiers nécessaires et retourne les données de minerais
@@ -504,10 +578,32 @@ ORE_VOLUMES: Dict[str, float] = {}
 COMPRESSION_RATIOS: Dict[str, int] = {}
 SDE_INFO: Dict[str, str] = {"version": "built-in", "updated_at": "n/a", "ore_count": "0"}
 
+# ---------------------------------------------------------------------------
+# ESI PRICE INFRASTRUCTURE
+# ---------------------------------------------------------------------------
+ESI_PRICE_CACHE_FILE = "esi_price_cache.json"
+ESI_PRICE_CACHE_TTL_HOURS = 24
+
+# Fallback type IDs for common ores used when SDE cache has no type_ids.
+# Grade variants ("II-Grade", "III-Grade", etc.) resolve to the base ore price.
+_ORE_TYPE_ID_FALLBACK: Dict[str, int] = {
+    "Veldspar": 1230, "Scordite": 1228, "Pyroxeres": 1224,
+    "Plagioclase": 18, "Omber": 1227, "Kernite": 20,
+    "Jaspet": 1226, "Hemorphite": 1229, "Hedbergite": 21,
+    "Arkonor": 22, "Bistot": 1223, "Crokite": 1225,
+    "Dark Ochre": 1232, "Mercoxit": 11396, "Spodumain": 19,
+}
+ORE_TYPE_IDS: Dict[str, int] = dict(_ORE_TYPE_ID_FALLBACK)  # extended from SDE cache below
+
+_esi_prices: Dict[int, float] = {}          # type_id → adjusted_price ISK/unit
+_esi_cache_lock = threading.Lock()
+
 _cached = _load_ore_data_from_cache()
 if _cached and "ore_volumes" in _cached:
     ORE_VOLUMES = {k: float(v) for k, v in _cached["ore_volumes"].items()}
     COMPRESSION_RATIOS = {k: int(v) for k, v in _cached["compression_ratios"].items()}
+    if "type_ids" in _cached:
+        ORE_TYPE_IDS.update({k: int(v) for k, v in _cached["type_ids"].items()})
     SDE_INFO["version"] = _cached.get("sde_version", "cached")
     SDE_INFO["updated_at"] = _cached.get("updated_at", "unknown")
     SDE_INFO["ore_count"] = str(_cached.get("ore_count", len(ORE_VOLUMES)))
@@ -850,6 +946,7 @@ class MiningDashboard:
                 tracker.log_pos = os.path.getsize(tracker.log_path)
     
         self.char_widgets: Dict[str, Dict] = {}
+        self.hub_timers: Dict[str, tk.Label] = {}
         self.floating_windows: Dict[str, tk.Toplevel] = {}
         # Restore hidden state from config so show/hide survives restarts
         self.hidden_windows: set = set(self.app_config.get("hidden_windows", []))
@@ -867,6 +964,10 @@ class MiningDashboard:
         self.root.bind("<B1-Motion>", self._do_drag)
 
         if HAS_PYSTRAY: self.setup_tray()
+
+        # Start ESI price background thread (fetches live Jita prices, 24h cache)
+        _t = threading.Thread(target=_esi_price_thread_worker, daemon=True, name="esi-price-thread")
+        _t.start()
 
         self.update_loop()
 
@@ -1113,6 +1214,7 @@ class MiningDashboard:
 
     # Reconstruit le panneau hub principal avec la liste des personnages et leurs boutons
     def rebuild_dashboard(self):
+        self.hub_timers.clear()
         if self.chars_container:
             for widget in self.chars_container.winfo_children():
                 widget.destroy()
@@ -1124,8 +1226,15 @@ class MiningDashboard:
                 fg=DIM, bg=BG, font=("Consolas", 9), justify="center"
             ).pack(pady=40)
         else:
-            tk.Label(self.chars_container, text="ACTIVE MINING FLEET", fg=DIM, bg=BG, font=("Consolas", 9, "bold")).pack(pady=(5, 5))
-            
+            tk.Label(self.chars_container, text="ACTIVE MINING FLEET", fg=DIM, bg=BG, font=("Consolas", 9, "bold")).pack(pady=(5, 2))
+
+            cmd_bar = tk.Frame(self.chars_container, bg=BG)
+            cmd_bar.pack(fill="x", padx=5, pady=(0, 6))
+            tk.Button(cmd_bar, text="▶ START ALL", command=self._start_all_sessions,
+                      bg=BG, fg=GREEN, font=("Consolas", 9, "bold"), relief="flat", cursor="hand2").pack(side="left", padx=(0, 6))
+            tk.Button(cmd_bar, text="⏏ EMPTY ALL", command=self._empty_all_cargo,
+                      bg=BG, fg=CYAN, font=("Consolas", 9, "bold"), relief="flat", cursor="hand2").pack(side="left")
+
             hub_outer = tk.Frame(self.chars_container, bg=BORDER, padx=1, pady=1)
             hub_outer.pack(fill="both", expand=True, padx=5, pady=(0, 10))
             
@@ -1164,7 +1273,11 @@ class MiningDashboard:
                 row_f.pack(fill="x", pady=0)
                 
                 tk.Label(row_f, text=f"★ {tracker.char_name.upper()}", fg=accent, bg=BG_PANEL, font=("Consolas", 10, "bold")).pack(side="left")
-                
+
+                timer_lbl = tk.Label(row_f, text="--:--:--", fg=accent, bg=BG_PANEL, font=("Consolas", 11, "bold"))
+                timer_lbl.pack(side="left", padx=(10, 0))
+                self.hub_timers[cid] = timer_lbl
+
                 is_hidden = cid in self.hidden_windows
 
                 def show_window(c_id):
@@ -1569,6 +1682,10 @@ class MiningDashboard:
         actual_label.pack(anchor="w", pady=1)
         actual_label.bind("<Button-3>", show_context_menu)
 
+        isk_label = tk.Label(rate_frame, text="◈ Value: -- ISK/h", fg=GOLD, bg=BG_PANEL, font=("Consolas", 9))
+        isk_label.pack(anchor="w", pady=1)
+        isk_label.bind("<Button-3>", show_context_menu)
+
         toggle_btn = tk.Button(col_inner, text="v  SESSION BREAKDOWN  v", bg=BG, fg=DIM, font=("Consolas", 8, "bold"), relief="flat", cursor="hand2")
         toggle_btn.pack(fill="x", pady=(5, 0))
 
@@ -1598,7 +1715,7 @@ class MiningDashboard:
 
         widgets = {
             'crit': crit_label, 'ore': ore_label, 'residue': residue_label, 'summary': summary_box,
-            'theoretical': theoretical_label, 'actual': actual_label,
+            'theoretical': theoretical_label, 'actual': actual_label, 'isk': isk_label,
             'start_stop_btn': start_stop_btn, 'ship_indicator': ship_indicator,
             'profile_label': profile_label, 'fleet_frame': fleet_frame,
             'copy_btn': copy_btn, 'send_btn': send_btn,
@@ -2556,6 +2673,32 @@ class MiningDashboard:
 
             self._update_rate_stats(char_id, tracker, w)
 
+            # ISK/hour — live ESI-priced value estimate
+            isk_per_hour = self._get_isk_per_hour(tracker)
+            if isk_per_hour is not None:
+                w['isk'].config(text=f"◈ Value: {isk_per_hour:,.0f} ISK/h")
+            else:
+                w['isk'].config(text="◈ Value: -- ISK/h")
+
+        # ── Hub session timers ──────────────────────────────────────────────────
+        for char_id, lbl in list(self.hub_timers.items()):
+            try:
+                if not lbl.winfo_exists():
+                    continue
+            except Exception:
+                continue
+            tracker = self.all_characters.get(char_id)
+            if not tracker:
+                continue
+            if tracker.session_active or tracker.session_elapsed_offset > 0:
+                dur = tracker.get_session_active_duration()
+                h = int(dur // 3600)
+                m = int((dur % 3600) // 60)
+                s = int(dur % 60)
+                lbl.config(text=f"{h:02d}:{m:02d}:{s:02d}")
+            else:
+                lbl.config(text="--:--:--")
+
     # Joue le son d'alerte critique et envoie une notification bureau si disponible
     def trigger_crit_alert(self) -> None:
         if HAS_NOTIFICATION:
@@ -2566,6 +2709,58 @@ class MiningDashboard:
             try:
                 winsound.PlaySound(CRIT_SOUND_FILE, winsound.SND_FILENAME | winsound.SND_ASYNC)
             except Exception: pass
+
+    def _start_all_sessions(self) -> None:
+        """Start sessions for all visible characters that are not already active."""
+        for cid, tracker in self.characters.items():
+            if not tracker.session_active:
+                self.toggle_session(cid)
+
+    def _empty_all_cargo(self) -> None:
+        """Reset cargo to 0 for all visible characters."""
+        for cid in list(self.characters.keys()):
+            self.empty_cargo(cid)
+
+    def _get_isk_per_hour(self, tracker: "CharacterTracker") -> Optional[float]:
+        """Return estimated ISK/h for the current session ore mix, or None if unavailable."""
+        with _esi_cache_lock:
+            prices = dict(_esi_prices)
+        if not prices or not tracker.ore_summary:
+            return None
+
+        total_isk = 0.0
+        total_m3 = 0.0
+        grade_suffixes = [" IV-Grade", " III-Grade", " II-Grade", " 0-Grade"]
+
+        for ore_name, ore_m3 in tracker.ore_summary.items():
+            type_id = ORE_TYPE_IDS.get(ore_name)
+            if type_id is None:
+                base_name = ore_name
+                for suffix in grade_suffixes:
+                    if ore_name.endswith(suffix):
+                        base_name = ore_name[: -len(suffix)]
+                        break
+                type_id = ORE_TYPE_IDS.get(base_name)
+            if type_id is None:
+                continue
+
+            price_per_unit = prices.get(type_id, 0.0)
+            vol_per_unit = ORE_VOLUMES.get(ore_name) or _DEFAULT_ORE_VOLUMES.get(ore_name, 0.0)
+            if vol_per_unit <= 0 or price_per_unit <= 0:
+                continue
+
+            isk_per_m3 = price_per_unit / vol_per_unit
+            total_isk += ore_m3 * isk_per_m3
+            total_m3 += ore_m3
+
+        if total_m3 <= 0:
+            return None
+
+        session_duration = tracker.get_session_active_duration()
+        if session_duration < 10:
+            return None
+
+        return total_isk / (session_duration / 3600.0)
 
     # Démarre ou arrête la session de minage pour un personnage donné
     def toggle_session(self, char_id: str):
@@ -2632,6 +2827,7 @@ class MiningDashboard:
         widgets['residue'].config(text="Residue: 0.0 m3")
         widgets['summary'].config(text="Waiting...")
         widgets['actual'].config(text="◉ Actual: -- m3/s")
+        widgets['isk'].config(text="◈ Value: -- ISK/h")
         widgets['copy_btn'].config(state="disabled", fg=DIM)
         widgets['copy_tip'].update_text("No mining data yet \u2014 start mining to enable")
         widgets['send_btn'].config(state="disabled", fg=DIM)
@@ -3842,11 +4038,12 @@ class MiningDashboard:
         session_duration = tracker.get_session_active_duration()
         hours = int(session_duration // 3600)
         minutes = int((session_duration % 3600) // 60)
-        duration_str = f"{hours}h {minutes:02d}m" if hours > 0 else f"{minutes}m"
+        seconds = int(session_duration % 60)
+        timer_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
         lines = [
             f"Mining Report — {tracker.char_name}",
-            f"Session: {duration_str} | Crit Bonus: {tracker.crit_m3:,.1f} m³ ({tracker.crit_count})",
+            f"Session: {timer_str} | Crit Bonus: {tracker.crit_m3:,.1f} m³ ({tracker.crit_count})",
             ""
         ]
 
@@ -3861,6 +4058,11 @@ class MiningDashboard:
 
         lines.append("")
         lines.append(f"Total: {total_m3:,.1f} m³")
+
+        isk_per_hour = self._get_isk_per_hour(tracker)
+        if isk_per_hour is not None:
+            lines.append(f"Value: {isk_per_hour:,.0f} ISK/h  (ESI adjusted price)")
+
         return "\n".join(lines)
 
     # Construit le payload JSON (embed Discord) prêt à envoyer au webhook
