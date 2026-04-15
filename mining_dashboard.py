@@ -947,6 +947,7 @@ class MiningDashboard:
     
         self.char_widgets: Dict[str, Dict] = {}
         self.hub_timers: Dict[str, tk.Label] = {}
+        self.hub_start_all_btn: Optional[tk.Button] = None
         self.floating_windows: Dict[str, tk.Toplevel] = {}
         # Restore hidden state from config so show/hide survives restarts
         self.hidden_windows: set = set(self.app_config.get("hidden_windows", []))
@@ -1230,8 +1231,11 @@ class MiningDashboard:
 
             cmd_bar = tk.Frame(self.chars_container, bg=BG)
             cmd_bar.pack(fill="x", padx=5, pady=(0, 6))
-            tk.Button(cmd_bar, text="▶ START ALL", command=self._start_all_sessions,
-                      bg=BG, fg=GREEN, font=("Consolas", 9, "bold"), relief="flat", cursor="hand2").pack(side="left", padx=(0, 6))
+            self.hub_start_all_btn = tk.Button(
+                cmd_bar, text="▶ START ALL", command=self._toggle_all_sessions,
+                bg=BG, fg=GREEN, font=("Consolas", 9, "bold"), relief="flat", cursor="hand2"
+            )
+            self.hub_start_all_btn.pack(side="left", padx=(0, 6))
             tk.Button(cmd_bar, text="⏏ EMPTY ALL", command=self._empty_all_cargo,
                       bg=BG, fg=CYAN, font=("Consolas", 9, "bold"), relief="flat", cursor="hand2").pack(side="left")
 
@@ -2680,6 +2684,9 @@ class MiningDashboard:
             else:
                 w['isk'].config(text="◈ Value: -- ISK/h")
 
+        # ── START ALL / STOP ALL button sync ───────────────────────────────────
+        self._refresh_start_all_btn()
+
         # ── Hub session timers ──────────────────────────────────────────────────
         for char_id, lbl in list(self.hub_timers.items()):
             try:
@@ -2710,16 +2717,39 @@ class MiningDashboard:
                 winsound.PlaySound(CRIT_SOUND_FILE, winsound.SND_FILENAME | winsound.SND_ASYNC)
             except Exception: pass
 
-    def _start_all_sessions(self) -> None:
-        """Start sessions for all visible characters that are not already active."""
-        for cid, tracker in self.characters.items():
-            if not tracker.session_active:
-                self.toggle_session(cid)
+    def _toggle_all_sessions(self) -> None:
+        """Toggle all visible sessions: start all if none active, stop all if any active."""
+        any_active = any(t.session_active for t in self.characters.values())
+        if any_active:
+            for cid, tracker in self.characters.items():
+                if tracker.session_active:
+                    self.toggle_session(cid)
+        else:
+            for cid, tracker in self.characters.items():
+                if not tracker.session_active:
+                    self.toggle_session(cid)
+        self._refresh_start_all_btn()
 
     def _empty_all_cargo(self) -> None:
         """Reset cargo to 0 for all visible characters."""
         for cid in list(self.characters.keys()):
             self.empty_cargo(cid)
+
+    def _refresh_start_all_btn(self) -> None:
+        """Update the START ALL / STOP ALL button label and colour to match fleet state."""
+        btn = self.hub_start_all_btn
+        if btn is None:
+            return
+        try:
+            if not btn.winfo_exists():
+                return
+        except Exception:
+            return
+        any_active = any(t.session_active for t in self.characters.values())
+        if any_active:
+            btn.config(text="■ STOP ALL", fg=RED)
+        else:
+            btn.config(text="▶ START ALL", fg=GREEN)
 
     def _get_isk_per_hour(self, tracker: "CharacterTracker") -> Optional[float]:
         """Return estimated ISK/h for the current session ore mix, or None if unavailable."""
