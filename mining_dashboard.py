@@ -780,6 +780,7 @@ class CharacterTracker:
         self.session_start_m3: float = 0.0
         self.session_elapsed_offset: float = 0.0
         self.session_active: bool = False
+        self.auto_stop_on_full: bool = True
 
     # Retourne la durée active cumulée de la session en secondes
     def get_session_active_duration(self) -> float:
@@ -1643,6 +1644,27 @@ class MiningDashboard:
         cycles_label = tk.Label(cargo_frame, text="Full in: --", fg=DIM, bg=BG_PANEL, font=("Consolas", 8))
         cycles_label.pack(anchor="w", pady=(2, 0))
 
+        _as_init_text = "⏸ Auto-Stop: ON" if tracker.auto_stop_on_full else "⏸ Auto-Stop: OFF"
+        _as_init_fg   = CYAN if tracker.auto_stop_on_full else DIM
+
+        def _toggle_auto_stop(cid=char_id):
+            t = self.all_characters[cid]
+            t.auto_stop_on_full = not t.auto_stop_on_full
+            self.save_ship_configs()
+            btn = self.char_widgets[cid].get('auto_stop_btn')
+            if btn:
+                btn.config(
+                    text="⏸ Auto-Stop: ON"  if t.auto_stop_on_full else "⏸ Auto-Stop: OFF",
+                    fg=CYAN                  if t.auto_stop_on_full else DIM,
+                )
+
+        auto_stop_btn = tk.Button(
+            cargo_frame, text=_as_init_text, command=_toggle_auto_stop,
+            bg=BG, fg=_as_init_fg, font=("Consolas", 7), relief="flat",
+            cursor="hand2", anchor="w",
+        )
+        auto_stop_btn.pack(anchor="w", pady=(1, 0))
+
         control_frame = tk.Frame(col_inner, bg=BG_PANEL)
         control_frame.pack(fill="x", pady=(5, 0))
         control_frame.bind("<Button-3>", show_context_menu)
@@ -1725,7 +1747,7 @@ class MiningDashboard:
             'copy_btn': copy_btn, 'send_btn': send_btn,
             'copy_tip': copy_tip, 'send_tip': send_tip,
             'cargo_text': cargo_text_label, 'cargo_canvas': cargo_canvas,
-            'cycles_label': cycles_label
+            'cycles_label': cycles_label, 'auto_stop_btn': auto_stop_btn,
         }
         return col_outer, widgets
 
@@ -2552,12 +2574,16 @@ class MiningDashboard:
         for line in data.splitlines():
             line_lower = line.lower()   # computed once, reused for notify check
             if "(notify)" in line_lower:
-                if any(kw.lower() in line_lower for kw in AUTO_PAUSE_KEYWORDS):
-                    tracker.session_elapsed_offset += time.time() - tracker.session_start_time
-                    tracker.session_active = False
-                    if tracker.char_id in self.char_widgets:
-                        self.char_widgets[tracker.char_id]['start_stop_btn'].config(text="▶ START", fg=GREEN)
-                    return
+                matched = [kw for kw in AUTO_PAUSE_KEYWORDS if kw.lower() in line_lower]
+                if matched:
+                    if not tracker.auto_stop_on_full:
+                        matched = [kw for kw in matched if "cargo hold is full" not in kw.lower()]
+                    if matched:
+                        tracker.session_elapsed_offset += time.time() - tracker.session_start_time
+                        tracker.session_active = False
+                        if tracker.char_id in self.char_widgets:
+                            self.char_widgets[tracker.char_id]['start_stop_btn'].config(text="▶ START", fg=GREEN)
+                        return
                 
             compression_match = COMPRESSION_PATTERN.search(line)
             if compression_match:
@@ -2718,14 +2744,15 @@ class MiningDashboard:
             except Exception: pass
 
     def _toggle_all_sessions(self) -> None:
-        """Toggle all visible sessions: start all if none active, stop all if any active."""
-        any_active = any(t.session_active for t in self.characters.values())
+        """Toggle sessions for non-hidden fleet members only."""
+        visible = {cid: t for cid, t in self.characters.items() if cid not in self.hidden_windows}
+        any_active = any(t.session_active for t in visible.values())
         if any_active:
-            for cid, tracker in self.characters.items():
+            for cid, tracker in visible.items():
                 if tracker.session_active:
                     self.toggle_session(cid)
         else:
-            for cid, tracker in self.characters.items():
+            for cid, tracker in visible.items():
                 if not tracker.session_active:
                     self.toggle_session(cid)
         self._refresh_start_all_btn()
@@ -2745,7 +2772,8 @@ class MiningDashboard:
                 return
         except Exception:
             return
-        any_active = any(t.session_active for t in self.characters.values())
+        visible = {cid: t for cid, t in self.characters.items() if cid not in self.hidden_windows}
+        any_active = any(t.session_active for t in visible.values())
         if any_active:
             btn.config(text="■ STOP ALL", fg=RED)
         else:
@@ -2771,6 +2799,13 @@ class MiningDashboard:
                         base_name = ore_name[: -len(suffix)]
                         break
                 type_id = ORE_TYPE_IDS.get(base_name)
+            if type_id is None:
+                # Fuzzy: find any known ore name that appears inside this ore_name
+                ore_lower = ore_name.lower()
+                for known_name, tid in ORE_TYPE_IDS.items():
+                    if known_name.lower() in ore_lower:
+                        type_id = tid
+                        break
             if type_id is None:
                 continue
 
@@ -2886,6 +2921,7 @@ class MiningDashboard:
                         tracker.implant_profiles[profile_name] = profile_data.get("highwall_implant", False)
                         tracker.cargo_profiles[profile_name] = profile_data.get("cargo_capacity", 0.0)
 
+                    tracker.auto_stop_on_full = cfg.get("auto_stop_on_full", True)
                     tracker.active_profile = cfg.get("active_profile", "Default")
                     if tracker.active_profile not in tracker.ship_profiles:
                         if tracker.ship_profiles: tracker.active_profile = list(tracker.ship_profiles.keys())[0]
@@ -2930,7 +2966,8 @@ class MiningDashboard:
                 }
             ship_configs[char_id] = {
                 "active_profile": tracker.active_profile,
-                "profiles": profiles_data
+                "profiles": profiles_data,
+                "auto_stop_on_full": tracker.auto_stop_on_full,
             }
         self.app_config["ship_configs"] = ship_configs
         self.save_config()
