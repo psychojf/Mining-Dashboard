@@ -1,6 +1,6 @@
 # EVE Mining Dashboard
 
-A real-time mining activity tracker for EVE Online. Reads your game logs to display live stats, critical hit alerts, cargo tracking, compression handling, session history, and fleet reporting — all in a compact, always-on-top overlay.
+A real-time mining activity tracker for EVE Online. Reads your game logs to display live stats, critical hit alerts, cargo tracking, compression handling, ISK/hour valuation, session history, and fleet reporting — all in a compact, always-on-top overlay.
 
 ---
 
@@ -10,17 +10,19 @@ A real-time mining activity tracker for EVE Online. Reads your game logs to disp
 |---|---|
 | **Multi-Character Support** | Automatically detects all characters from your EVE game logs |
 | **Live Mining Stats** | Tracks total m3 mined, m3/s rate, and critical hit count in real time |
+| **ISK/Hour Valuation** | Live ISK/h display (e.g. `229.23 M ISK/h`) using ESI adjusted prices, auto-resolved per ore type |
 | **Session Control** | Start / Stop / Reset per character to measure specific mining runs |
 | **Theoretical vs Actual Rate** | Compare configured ship yield against real-world performance |
 | **Ship Profiles** | Multiple named fittings per character (modules, drones, implant, cargo) |
 | **Cargo Tracking** | Visual cargo bar with time-to-full estimate; updates automatically on compression |
-| **Compression Handling** | Detects in-space compression events and correctly adjusts the cargo bar |
+| **Compression Handling** | Detects in-space compression events (including multi-word ore names) and correctly adjusts the cargo bar |
+| **Auto-Stop Toggle** | Per-character button to disable auto-pause on cargo-full events while keeping all other auto-pause triggers active |
 | **Ore Breakdown** | Live per-ore-type volume summary for the current session |
 | **Mining History** | Analyze historical data across all characters over a configurable date range |
 | **Excel Export** | One-click .xlsx export with Summary, Ore Pivot, and Daily sheets per character |
 | **Critical Hit Alerts** | Desktop notification + optional WAV sound on critical mining successes |
-| **Fleet Mode** | Share session reports via Discord webhook or clipboard copy |
-| **20+ Themes** | EVE faction colour themes (CONCORD, Gallente, Caldari, Amarr, and more) |
+| **Fleet Mode** | Share session reports (including ISK/h) via Discord webhook or clipboard copy |
+| **20+ Themes** | EVE faction colour themes (CONCORD, Gallente, Caldari, Amarr, and more) — applied live without closing the Config dialog |
 | **Always-On-Top Overlay** | Semi-transparent, borderless windows that stay above your game |
 | **System Tray** | Minimize to tray; left-click to restore, right-click to exit |
 
@@ -74,10 +76,11 @@ All settings are stored in `mining_config.json` (auto-created on first run, in t
 
 Open the **⚙ Config** dialog from the hub to configure:
 
-- **Characters** — choose which pilots appear on the dashboard
-- **Appearance** — theme, history days, window transparency, critical hit sound
+- **Character Selection** — choose which pilots appear on the dashboard (3-column grid, up to 15 visible without scrolling)
+- **Paths & Files** — set your EVE gamelogs folder path
+- **Appearance & Limits** — theme (applied live, no dialog flicker), history days, window transparency, critical hit sound
 - **Fleet** — Discord webhook URL for fleet reporting
-- **Database** — view SDE version and download the latest ore data
+- **Ore Database (SDE)** — view SDE version and download the latest ore data with a live progress bar
 
 Delete `mining_config.json` to fully reset to defaults.
 
@@ -87,7 +90,30 @@ Delete `mining_config.json` to fully reset to defaults.
 
 Ore volumes and compression ratios are sourced from the EVE Static Data Export.
 A bundled set of data is included out of the box.
-Use **⚙ Config → DATABASE → UPDATE ORE DATA** after a major EVE expansion to pull the latest values.
+Use **⚙ Config → ORE DATABASE → UPDATE ORE DATA** after a major EVE expansion to pull the latest values.
+
+---
+
+## ISK/Hour Valuation
+
+The dashboard fetches adjusted market prices from the EVE ESI API (`/markets/prices/`) on startup
+and resolves ore type IDs automatically via `/universe/ids/`. Prices are cached locally in
+`esi_price_cache.json` and refreshed periodically.
+
+The ISK/h value is shown as `229.23 M ISK/h` on each character frame and included in session reports.
+If the value shows `--`, a hint message explains the reason (e.g. `[fetching prices...]`, `[no ore yet]`).
+
+---
+
+## Auto-Stop Toggle
+
+Each character frame has an **⏸ Auto-Stop** button in the cargo section:
+
+- **ON** (cyan) — session pauses automatically when the cargo hold is full *(default)*
+- **OFF** (dim) — cargo-full events are ignored; the session keeps running uninterrupted
+
+Other auto-pause events (asteroid depleted, targeting failed) are always active regardless of this setting.
+The preference is saved per character in `mining_config.json`.
 
 ---
 
@@ -97,5 +123,7 @@ See **HOW_TO.txt** for full usage instructions covering:
 - Starting and stopping sessions
 - Configuring ship fittings and cargo hold
 - Compression and cargo bar behaviour
+- Auto-Stop toggle per character
+- ISK/hour display and ESI pricing
 - Fleet mode and Discord reporting
 - Mining history and Excel export

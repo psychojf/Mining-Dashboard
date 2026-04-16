@@ -6,27 +6,56 @@
 Your characters are detected automatically from your EVE game logs.
 Click the gear icon (⚙) in the top-right corner of the hub to open the Config dialog.
 
-The Config dialog is organized into four sections accessible from the left sidebar:
+The Config dialog is a single scrollable panel with all settings visible at once:
 
-  ◈ CHARACTERS
-    - Check or uncheck pilots to show or hide them on the dashboard.
+  ◆ CHARACTER SELECTION
+    - Shows all detected pilots in a 3-column grid.
+    - Check or uncheck each pilot to show or hide them on the dashboard.
     - Use SELECT ALL / DESELECT ALL to quickly toggle all at once.
+    - Up to 15 pilots are shown without scrolling; more than 15 activates a scrollbar.
 
-  ◈ APPEARANCE
-    - Gamelogs Path    : Change this if your EVE logs are in a non-default location.
+  ◆ PATHS & FILES
+    - Gamelogs Path : Change this if your EVE logs are in a non-default location.
+
+  ◆ APPEARANCE & LIMITS
+    - Dashboard Theme    : Choose from 20+ EVE faction colour themes. Selecting one applies
+                           it immediately in-place — the Config dialog stays open and recolors
+                           live without closing or flickering.
     - Default History Days : How many days back the History window analyzes by default.
-    - Dashboard Theme  : Choose from 20+ EVE faction colour themes. Selecting one applies it immediately.
-    - Window Transparency : Slider to set the opacity of all dashboard windows (20%–100%).
+    - Window Transparency  : Slider to set the opacity of all dashboard windows (20%–100%).
     - Play audio on Critical Hit : Toggle the audio alert on critical mining successes.
 
-  ◈ FLEET
+  ◆ FLEET
     - Webhook URL : Paste a Discord webhook URL to enable fleet reporting (see Fleet Mode below).
 
-  ◈ DATABASE
+  ◆ ORE DATABASE (SDE)
     - Displays the current ore database version, ore count, and last update timestamp.
     - Click UPDATE ORE DATA to download the latest EVE SDE ore volumes and compression ratios.
+      A progress bar appears during the download.
 
 Click SAVE to apply all changes, or CANCEL to discard.
+
+
+### ISK/Hour Display
+
+Each character frame shows a live ISK/h value based on ESI market prices:
+
+  - Displayed as "◈ Value: 229.23 M ISK/h" (millions, 2 decimal places).
+  - Prices are fetched from the EVE ESI API on startup and cached locally.
+  - Ore type IDs are resolved automatically via the ESI universe/ids endpoint.
+  - If the value shows "--", a hint explains why (fetching prices, no ore yet, resolving IDs, etc.).
+
+
+### Auto-Stop Toggle (per character)
+
+By default, the session pauses automatically when your cargo hold is full.
+Each character frame has an ⏸ Auto-Stop button in the cargo section:
+
+  - ⏸ Auto-Stop: ON  (cyan)  — session pauses when cargo is full (default behaviour).
+  - ⏸ Auto-Stop: OFF (dim)   — cargo-full events are ignored; session keeps running.
+
+Click the button to toggle. The setting is saved per character and persists across restarts.
+Note: other auto-pause triggers (asteroid depleted, targeting failed) are always active.
 
 
 ### Main Window Controls
@@ -87,9 +116,9 @@ Right-click anywhere on a character's floating window and select ⚙ Ship Config
 
   Modules
     Configure up to 5 mining modules per profile. For each:
-      - Module Name    : A label for your reference (e.g. "Strip Miner I")
+      - Module Name      : A label for your reference (e.g. "Strip Miner I")
       - Yield (m3/cycle) : How many m3 the module extracts per cycle (check your fitting window in EVE)
-      - Cycle Time (s) : Duration of one cycle in seconds
+      - Cycle Time (s)   : Duration of one cycle in seconds
     Use the checkboxes to enable/disable individual modules. The Theoretical rate preview updates live.
 
   Drones
@@ -101,6 +130,7 @@ Right-click anywhere on a character's floating window and select ⚙ Ship Config
   Cargo Hold
     Set your ship's cargo capacity to enable the cargo progress bar and time-to-full estimates.
     When you compress ore in-space, the bar automatically adjusts to reflect the reduced volume.
+    Multi-word ore names (e.g. "Compressed Arkonor") are fully supported.
 
   Click SAVE to apply the fitting.
 
@@ -109,8 +139,8 @@ Right-click anywhere on a character's floating window and select ⚙ Ship Config
 
   1. Set up your ship fitting and position the character window where you want it on screen.
   2. Click ▶ START on a character's frame to begin tracking.
-  3. Mine as usual in EVE — stats, critical hits, cargo bar, and actual m3/s rate update in real time.
-  4. The Residue stat tracks ore volume lost to compression residue.
+  3. Mine as usual in EVE — stats, critical hits, cargo bar, ISK/h, and actual m3/s update in real time.
+  4. The Residue stat tracks ore volume lost to compression residue (normal with T2 crystals).
   5. Click "v SESSION BREAKDOWN v" to see the per-ore detail.
   6. Click ■ STOP to pause tracking without clearing data.
   7. Click ↺ RESET to clear all session stats and cargo for that character.
@@ -118,7 +148,7 @@ Right-click anywhere on a character's floating window and select ⚙ Ship Config
 
   Auto-Pause:
     The session pauses automatically (returns to ▶ START) when EVE logs any of:
-      - Your cargo hold is full
+      - Your cargo hold is full  (can be disabled per character with ⏸ Auto-Stop: OFF)
       - The asteroid you are mining is depleted
       - A targeting attempt failed (object no longer present)
     Simply click ▶ START again to resume after repositioning or switching rocks.
@@ -132,13 +162,19 @@ automatically adjusts the cargo bar:
   - The compressed volume is added back (raw / compression ratio).
   - Net result: the bar drops significantly but does NOT go to zero — it reflects what is actually
     in your hold after compression.
+  - Works for all ore names including multi-word types (e.g. "Compressed Crimson Arkonor").
+
+Note on Residue: If you use Modulated Strip Miner II with T2 crystals, EVE's Scrapmetal Processing
+skill causes genuine ore loss logged as "Additional X units depleted from asteroid as residue."
+This is normal EVE game behaviour, not a dashboard bug. The Residue stat reflects this accurately.
 
 
 ### Fleet Mode & Discord Reporting
 
   1. Open ⚙ Config → FLEET and paste your Discord webhook URL.
   2. Once a session has active data, two buttons appear on the character frame:
-       - ⎘ Copy to Clipboard : Copies a plain-text report (duration, crits, total m3, ore breakdown).
+       - ⎘ Copy to Clipboard : Copies a plain-text report (duration, crits, total m3, ore breakdown,
+                               ISK/h value).
        - ▲ Send to Discord   : Opens a preview, then posts the report to your Discord server.
 
 
@@ -160,5 +196,6 @@ All settings are saved automatically to mining_config.json in the same folder as
   - Character visibility selections and hidden states
   - All ship profiles, modules, drones, implant, and cargo configurations
   - Application settings (log path, webhook, theme, sound toggle, transparency)
+  - Auto-Stop preference per character
 
 Note: Delete mining_config.json to completely reset the application to its default state.
