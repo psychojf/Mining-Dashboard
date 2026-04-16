@@ -1,0 +1,15 @@
+# Credentials — never commit
+esi_tokens.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Tools
+.pytest_cache/
