@@ -12,6 +12,7 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
+from collections import deque
 from functools import lru_cache
 import tkinter as tk
 from tkinter import ttk
@@ -685,6 +686,8 @@ LOG_TIMESTAMP = re.compile(r'^\[\s*(\d{4}\.\d{2}\.\d{2})\s+\d{2}:\d{2}:\d{2}\s*\
 # SDE download progress messages embed a percentage like "(34%)" — pre-compiled to avoid
 # creating a new pattern object on every progress callback invocation
 SDE_PROGRESS_PCT = re.compile(r'\((?P<pct>\d+)%\)')
+AUTO_PAUSE_SECONDS = 120   # auto-pause if no mine event for this many seconds
+RATE_WINDOW_SEC    = 120   # rolling window width for m³/s rate display
 
 _ORE_CATEGORIES = {
     "Veldspar": "2ecc40", "Scordite": "2ecc40", "Pyroxeres": "2ecc40", "Plagioclase": "2ecc40", "Omber": "2ecc40", "Kernite": "2ecc40",
@@ -843,6 +846,9 @@ class CharacterTracker:
         self.session_elapsed_offset: float = 0.0
         self.session_active: bool = False
         self.auto_stop_on_full: bool = True
+        self.last_mine_mono: float = 0.0
+        self._rate_window: deque = deque()
+
 
     # Retourne la durée active cumulée de la session en secondes
     def get_session_active_duration(self) -> float:
@@ -1002,7 +1008,7 @@ class MiningDashboard:
         self.all_characters = self.discover_all_characters()
         self.characters = self.get_visible_characters()
         self.load_ship_configs()
-    
+
         for tracker in self.all_characters.values():
             tracker.log_path = self._get_latest_log_for_char(tracker.char_id)
             if tracker.log_path:
@@ -1020,8 +1026,9 @@ class MiningDashboard:
         self.ship_config_dialogs: Dict[str, tk.Toplevel] = {}
         self.config_dialog: Optional[tk.Toplevel] = None
         self.update_loop_running = True
-    
+
         self.setup_ui()
+
         self.sync_floating_windows()
         
         self.root.bind("<Button-1>", self._start_drag)
@@ -1048,6 +1055,7 @@ class MiningDashboard:
             except Exception as _e:
                 print(f"[error] MiningDashboard.__init__: watchdog failed to start on {_gamelog_dir}: {_e}")
 
+        self.root.after(30_000, self._auto_pause_tick)
         self.root.deiconify()
         self.root.after(10, self.set_app_window)
         self.root.mainloop()
@@ -1788,10 +1796,11 @@ class MiningDashboard:
             else:
                 session_container.pack(fill="both", expand=True)
                 toggle_btn.config(text="^  HIDE BREAKDOWN  ^")
-            
+
             top = col_outer.winfo_toplevel()
-            if not getattr(top, '_user_resized', False):
-                top.geometry("")
+            top.update_idletasks()
+            req_h = top.winfo_reqheight()
+            top.geometry(f"{top.winfo_width()}x{req_h}+{top.winfo_x()}+{top.winfo_y()}")
 
         toggle_btn.config(command=toggle_session_breakdown)
 
@@ -2617,27 +2626,40 @@ class MiningDashboard:
                             new_data = f.read()
                             new_pos = f.tell()
                             if new_data:
-                                was_active = tracker.session_active
                                 self._process_log_data(tracker, new_data)
-                                if was_active: tracker.log_pos = new_pos
-                            elif tracker.session_active:
-                                tracker.log_pos = new_pos
+                            tracker.log_pos = new_pos
                     except Exception: pass
             self._update_ui_labels()
         except Exception: pass
         # No reschedule here — _GamelogHandler.on_modified/on_created calls
         # root.after(0, self.update_loop) whenever a gamelog file changes
 
+    # Auto-start a session when the first mine event is detected without user clicking START
+    def _auto_start_session(self, tracker: CharacterTracker) -> None:
+        tracker.session_active = True
+        tracker.session_start_time = time.time()
+        if not tracker.ore_summary:
+            tracker.session_start_m3 = tracker.total_m3
+            tracker.session_elapsed_offset = 0.0
+        if tracker.char_id in self.char_widgets:
+            w = self.char_widgets[tracker.char_id]
+            w['start_stop_btn'].config(text="■ STOP", fg=RED)
+            rate = tracker.get_total_theoretical_m3_per_sec()
+            if rate > 0:
+                w['actual'].config(text=f"◉ Actual: {rate:.2f} m3/s ({rate * 3600:,.0f} m3/hr)")
+        self._refresh_start_all_btn()
+
     # Parse les lignes de log EVE pour extraire minage normal, critique, compression et résidu
     def _process_log_data(self, tracker: CharacterTracker, data: str) -> None:
-        if not tracker.session_active: return
         crit_processed = False
         last_mined_volume = 0.0
         last_mined_ore = "Unknown"
 
         for line in data.splitlines():
-            line_lower = line.lower()   # computed once, reused for notify check
-            if "(notify)" in line_lower:
+            line_lower = line.lower()
+
+            # notify-based auto-pause (cargo full, etc.) — only when session is already running
+            if tracker.session_active and "(notify)" in line_lower:
                 matched = [kw for kw in AUTO_PAUSE_KEYWORDS if kw.lower() in line_lower]
                 if matched:
                     if not tracker.auto_stop_on_full:
@@ -2648,36 +2670,45 @@ class MiningDashboard:
                         if tracker.char_id in self.char_widgets:
                             self.char_widgets[tracker.char_id]['start_stop_btn'].config(text="▶ START", fg=GREEN)
                         return
-                
-            compression_match = COMPRESSION_PATTERN.search(line)
-            if compression_match:
-                ore_type = compression_match.group('ore_type')
-                compressed_amount = float(compression_match.group('amount').replace(",", ""))
-                compression_ratio = COMPRESSION_RATIOS.get(ore_type, 100)
-                original_units = compressed_amount * compression_ratio
-                volume_per_unit, ore_name = self.get_ore_volume(ore_type)
-                total_raw_volume = original_units * volume_per_unit
-                compressed_volume = total_raw_volume / compression_ratio if compression_ratio > 0 else total_raw_volume
-                tracker.current_cargo = max(0.0, tracker.current_cargo - total_raw_volume + compressed_volume)
-                tracker.compression_log[ore_name] = tracker.compression_log.get(ore_name, 0) + total_raw_volume
-                continue
+
+            # compression — only meaningful inside an active session
+            if tracker.session_active:
+                compression_match = COMPRESSION_PATTERN.search(line)
+                if compression_match:
+                    ore_type = compression_match.group('ore_type')
+                    compressed_amount = float(compression_match.group('amount').replace(",", ""))
+                    compression_ratio = COMPRESSION_RATIOS.get(ore_type, 100)
+                    original_units = compressed_amount * compression_ratio
+                    volume_per_unit, ore_name = self.get_ore_volume(ore_type)
+                    total_raw_volume = original_units * volume_per_unit
+                    compressed_volume = total_raw_volume / compression_ratio if compression_ratio > 0 else total_raw_volume
+                    tracker.current_cargo = max(0.0, tracker.current_cargo - total_raw_volume + compressed_volume)
+                    tracker.compression_log[ore_name] = tracker.compression_log.get(ore_name, 0) + total_raw_volume
+                    continue
 
             if not MINING_LINE.match(line): continue
 
             regular_match = REGULAR_MINE_PATTERN.search(line)
             if regular_match:
+                if not tracker.session_active:
+                    self._auto_start_session(tracker)
                 units = float(regular_match.group('amount').replace(",", ""))
                 volume, ore_name = self.get_ore_volume(regular_match.group('ore_type'))
                 total_volume = units * volume
                 tracker.total_m3 += total_volume
                 tracker.current_cargo += total_volume
                 tracker.ore_summary[ore_name] = tracker.ore_summary.get(ore_name, 0) + total_volume
+                now_mono = time.monotonic()
+                tracker.last_mine_mono = now_mono
+                tracker._rate_window.append((now_mono, total_volume))
                 last_mined_volume = volume
                 last_mined_ore = ore_name
 
             if CRITICAL_HIT_KEYWORD in line and not crit_processed:
                 crit_match = CRIT_MINE_PATTERN.search(line)
                 if crit_match:
+                    if not tracker.session_active:
+                        self._auto_start_session(tracker)
                     units = float(crit_match.group('amount').replace(",", ""))
                     ore_type_clean = crit_match.group('ore_type').split('<')[0].split('\r')[0].split('\n')[0].strip()
                     volume, ore_name = self.get_ore_volume(ore_type_clean)
@@ -2689,6 +2720,9 @@ class MiningDashboard:
                     tracker.crit_m3 += total_volume
                     crit_processed = True
                     self.trigger_crit_alert()
+                    now_mono = time.monotonic()
+                    tracker.last_mine_mono = now_mono
+                    tracker._rate_window.append((now_mono, total_volume))
                     last_mined_volume = volume
                     last_mined_ore = ore_name
 
@@ -2806,6 +2840,23 @@ class MiningDashboard:
             try:
                 winsound.PlaySound(CRIT_SOUND_FILE, winsound.SND_FILENAME | winsound.SND_ASYNC)
             except Exception: pass
+
+    def _auto_pause_tick(self) -> None:
+        """Fires every 30 s; auto-pauses sessions with no mine event for AUTO_PAUSE_SECONDS."""
+        now_mono = time.monotonic()
+        changed = False
+        for char_id, tracker in self.characters.items():
+            if (tracker.session_active and tracker.last_mine_mono > 0
+                    and now_mono - tracker.last_mine_mono > AUTO_PAUSE_SECONDS):
+                tracker.session_elapsed_offset += time.time() - tracker.session_start_time
+                tracker.session_active = False
+                tracker.last_mine_mono = 0.0
+                if char_id in self.char_widgets:
+                    self.char_widgets[char_id]['start_stop_btn'].config(text="▶ START", fg=GREEN)
+                changed = True
+        if changed:
+            self._refresh_start_all_btn()
+        self.root.after(30_000, self._auto_pause_tick)
 
     def _toggle_all_sessions(self) -> None:
         """Toggle sessions for non-hidden fleet members only."""
@@ -2978,6 +3029,8 @@ class MiningDashboard:
         tracker.session_start_time = time.time()
         tracker.session_start_m3 = 0.0
         tracker.session_elapsed_offset = 0.0
+        tracker.last_mine_mono = 0.0
+        tracker._rate_window.clear()
 
         widgets['crit'].config(text="Crit Bonus: 0.0 m³")
         widgets['ore'].config(text="Total: 0.0 m3")
@@ -3153,10 +3206,10 @@ class MiningDashboard:
         modules_label = tk.Label(main_frame, text="◆ MINING MODULES", fg=CYAN, bg=BG_PANEL, font=("Consolas", 9, "bold"))
         modules_label.grid(row=2, column=0, columnspan=4, sticky="w", pady=(0, 10))
 
-        tk.Label(main_frame, text="", bg=BG_PANEL, width=3).grid(row=3, column=0)
-        tk.Label(main_frame, text="Module Name", fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).grid(row=3, column=1, padx=5)
-        tk.Label(main_frame, text="Yield (m3/cycle)", fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).grid(row=3, column=2, padx=5)
-        tk.Label(main_frame, text="Cycle Time (s)", fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).grid(row=3, column=3, padx=5)
+        tk.Label(main_frame, text="", bg=BG_PANEL, width=3).grid(row=4, column=0)
+        tk.Label(main_frame, text="Module Name", fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).grid(row=4, column=1, padx=5)
+        tk.Label(main_frame, text="Yield (m3/cycle)", fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).grid(row=4, column=2, padx=5)
+        tk.Label(main_frame, text="Cycle Time (s)", fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).grid(row=4, column=3, padx=5)
 
         module_vars = []
 
@@ -3187,7 +3240,7 @@ class MiningDashboard:
 
         for i in range(MAX_MODULES):
             module = active_modules[i] if i < len(active_modules) else MiningModule()
-            row = 4 + i
+            row = 5 + i
             enabled_var = tk.BooleanVar(value=module.enabled and module.is_configured())
             enabled_cb = tk.Checkbutton(main_frame, variable=enabled_var, bg=BG_PANEL, activebackground=BG_PANEL, selectcolor=WHITE, highlightthickness=0)
             enabled_cb.grid(row=row, column=0, padx=2, pady=3)
@@ -3213,7 +3266,7 @@ class MiningDashboard:
 
             module_vars.append({'enabled': enabled_var, 'name': name_var, 'yield': yield_var, 'cycle': cycle_var, 'name_entry': name_entry})
 
-        sep_row = 4 + MAX_MODULES
+        sep_row = 5 + MAX_MODULES
 
         drones_label = tk.Label(main_frame, text="◆ MINING DRONES", fg=CYAN, bg=BG_PANEL, font=("Consolas", 9, "bold"))
         drones_label.grid(row=sep_row, column=0, columnspan=4, sticky="w", pady=(15, 5))
@@ -3576,8 +3629,10 @@ class MiningDashboard:
         tracker = self.all_characters[char_id]
         if char_id not in self.char_widgets: return
         widgets = self.char_widgets[char_id]
-        if tracker.has_any_configured_module(): widgets['ship_indicator'].config(fg=GREEN)
-        else: widgets['ship_indicator'].config(fg=RED)
+        if tracker.has_any_configured_module():
+            widgets['ship_indicator'].config(fg=GREEN)
+        else:
+            widgets['ship_indicator'].config(fg=RED)
 
     # Met à jour l'étiquette du profil actif affiché dans l'interface principale
     def update_profile_label(self, char_id: str):
@@ -3591,12 +3646,23 @@ class MiningDashboard:
         if theoretical_m3_per_sec > 0: widgets['theoretical'].config(text=f"◈ Theoretical: {theoretical_m3_per_sec:.2f} m3/s ({theoretical_m3_per_sec * 3600:,.0f} m3/hr)")
         else: widgets['theoretical'].config(text="◈ Theoretical: -- m3/s (configure ship)")
 
-        if not tracker.session_active: return
+        if not tracker.session_active:
+            widgets['actual'].config(text="◉ Actual: 0.00 m3/s (0 m3/hr)")
+            return
+
+        # Rolling window: trim events older than RATE_WINDOW_SEC
+        now_mono = time.monotonic()
+        cutoff = now_mono - RATE_WINDOW_SEC
+        while tracker._rate_window and tracker._rate_window[0][0] < cutoff:
+            tracker._rate_window.popleft()
 
         actual_m3_per_sec = 0.0
-        session_duration = tracker.get_session_active_duration()
-        if session_duration > 10 and tracker.total_m3 > 0:
-            actual_m3_per_sec = (tracker.total_m3 - tracker.session_start_m3) / session_duration
+        if tracker._rate_window:
+            window_m3 = sum(m3 for _, m3 in tracker._rate_window)
+            # Denominator grows with session age up to RATE_WINDOW_SEC so rate is accurate immediately
+            denominator = min(tracker.get_session_active_duration(), RATE_WINDOW_SEC)
+            if denominator > 5:
+                actual_m3_per_sec = window_m3 / denominator
 
         widgets['actual'].config(text=f"◉ Actual: {actual_m3_per_sec:.2f} m3/s ({actual_m3_per_sec * 3600:,.0f} m3/hr)")
 
