@@ -982,6 +982,7 @@ class MiningDashboard:
 
         self._drag_x = 0
         self._drag_y = 0
+        self._drag_suppress = False
         self._is_rolled_up = False      # EVE-style window shade: collapsed to title bar only
         self._full_height = 0           # Full height saved before collapsing
         self._hidden_widgets = []       # Content widgets hidden during rollup
@@ -1033,6 +1034,7 @@ class MiningDashboard:
         
         self.root.bind("<Button-1>", self._start_drag)
         self.root.bind("<B1-Motion>", self._do_drag)
+        self.root.bind("<ButtonRelease-1>", lambda e: setattr(self, '_drag_suppress', False))
 
         if HAS_PYSTRAY: self.setup_tray()
 
@@ -1358,7 +1360,7 @@ class MiningDashboard:
                 is_hidden = cid in self.hidden_windows
 
                 def show_window(c_id):
-                    # Bring back the withdrawn floating window
+                    self._drag_suppress = True
                     top = self.floating_windows.get(c_id)
                     if top and top.winfo_exists():
                         top.deiconify()
@@ -1368,7 +1370,7 @@ class MiningDashboard:
                     self.rebuild_dashboard()
 
                 def hide_window(c_id):
-                    # Withdraw floating window — stays in fleet, can be shown again
+                    self._drag_suppress = True
                     top = self.floating_windows.get(c_id)
                     if top and top.winfo_exists():
                         top.withdraw()
@@ -1473,18 +1475,17 @@ class MiningDashboard:
 
     # Enregistre la position initiale pour le glissement de la fenêtre principale
     def _start_drag(self, event):
+        if self._drag_suppress: return
         widget = event.widget
         if isinstance(widget, tk.Button): return
-        # Ignore clicks on clickable labels AND the resize grip
         if isinstance(widget, tk.Label) and widget.cget("cursor") in ["hand2", "sizing"]: return
         self._drag_x = event.x
         self._drag_y = event.y
 
-    # Déplace la fenêtre principale en suivant le mouvement de la souris
     def _do_drag(self, event):
+        if self._drag_suppress: return
         widget = event.widget
         if isinstance(widget, tk.Button): return
-        # Ignore drags on clickable labels AND the resize grip
         if isinstance(widget, tk.Label) and widget.cget("cursor") in ["hand2", "sizing"]: return
         x = self.root.winfo_x() + event.x - self._drag_x
         y = self.root.winfo_y() + event.y - self._drag_y
@@ -3797,9 +3798,19 @@ class MiningDashboard:
                   bg=BG, fg=WHITE, font=("Consolas", 8, "bold"),
                   relief="flat", cursor="hand2", width=12).pack(side="left")
 
-        # character grid — plain frame, 3 columns, no canvas, no scrollbar
-        grid_frame = tk.Frame(body, bg=BG_PANEL)
-        grid_frame.pack(fill="x", pady=(0, 2))
+        # character grid — scrollable canvas, 3 columns, capped height
+        GRID_MAX_H = 220
+        grid_outer = tk.Frame(body, bg=BG_PANEL)
+        grid_outer.pack(fill="x", pady=(0, 2))
+        grid_canvas = tk.Canvas(grid_outer, bg=BG_PANEL, highlightthickness=0,
+                                height=GRID_MAX_H)
+        grid_sb = tk.Scrollbar(grid_outer, orient="vertical", command=grid_canvas.yview)
+        grid_canvas.configure(yscrollcommand=grid_sb.set)
+        grid_canvas.pack(side="left", fill="x", expand=True)
+
+        grid_frame = tk.Frame(grid_canvas, bg=BG_PANEL)
+        grid_win = grid_canvas.create_window((0, 0), window=grid_frame, anchor="nw")
+
         for c in range(3):
             grid_frame.columnconfigure(c, weight=1)
 
@@ -3817,6 +3828,27 @@ class MiningDashboard:
                                 font=("Consolas", 8), cursor="hand2")
             name_lbl.pack(side="left")
             name_lbl.bind("<Button-1>", lambda e, b=box: b.event_generate("<Button-1>"))
+
+        def _on_grid_configure(event):
+            grid_canvas.configure(scrollregion=grid_canvas.bbox("all"))
+            needed = grid_frame.winfo_reqheight()
+            new_h = min(needed, GRID_MAX_H)
+            grid_canvas.configure(height=new_h)
+            if needed > GRID_MAX_H:
+                grid_sb.pack(side="right", fill="y")
+            else:
+                grid_sb.pack_forget()
+
+        def _on_grid_canvas_resize(event):
+            grid_canvas.itemconfig(grid_win, width=event.width)
+
+        grid_frame.bind("<Configure>", _on_grid_configure)
+        grid_canvas.bind("<Configure>", _on_grid_canvas_resize)
+
+        def _grid_mousewheel(event):
+            grid_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        grid_canvas.bind("<Enter>", lambda e: grid_canvas.bind_all("<MouseWheel>", _grid_mousewheel))
+        grid_canvas.bind("<Leave>", lambda e: grid_canvas.unbind_all("<MouseWheel>"))
 
         # ── ◆ PATHS & FILES ──────────────────────────────────────────────
         _sep()
