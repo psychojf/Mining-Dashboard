@@ -1151,9 +1151,15 @@ class MiningDashboard:
 
     # Sauvegarde la liste des personnages visibles et synchronise les fenêtres
     def save_visible_characters(self, visible_char_ids: List[str]):
+        previous = set(self.app_config.get("visible_characters", []) or [])
+        newly_added = set(visible_char_ids) - previous
         self.app_config["visible_characters"] = visible_char_ids
         self.save_config()
         self.characters = self.get_visible_characters()
+        for cid in newly_added:
+            self.hidden_windows.add(cid)
+        if newly_added:
+            self._save_hidden_windows()
         self.sync_floating_windows()
         self.rebuild_dashboard()
 
@@ -2576,12 +2582,15 @@ class MiningDashboard:
         return {}
 
     # Sauvegarde la configuration actuelle dans le fichier JSON
-    def save_config(self) -> None:
+    def save_config(self) -> bool:
         self.app_config["win_geom"] = self.root.winfo_geometry()
         try:
             with open(CONFIG_FILE, "w") as f:
                 json.dump(self.app_config, f, indent=2)
-        except Exception: pass
+            return True
+        except Exception as e:
+            self._last_save_error = str(e)
+            return False
 
     # Fermeture propre : sauvegarde la géométrie/config, arrête le tray et quitte
     def on_close(self) -> None:
@@ -4092,47 +4101,62 @@ class MiningDashboard:
                 new_history = int(history_var.get())
                 if new_history < 1: new_history = 1
             except ValueError:
-                messagebox.showerror("Invalid Input", "Please enter a valid number for history days.")
+                messagebox.showerror("Invalid Input", "Please enter a valid number for history days.", parent=dialog)
                 return
 
-            selected_theme  = theme_var.get()
-            theme_changed   = selected_theme != self.app_theme
-            selected_chars  = [cid for cid, v in char_vars.items() if v.get()]
-            self.save_visible_characters(selected_chars)
-
-            DOCS             = docs_var.get().strip()
-            HISTORY_DAYS     = new_history
-            PLAY_CRIT_SOUND  = crit_sound_var.get()
-            WIN_ALPHA        = max(0.2, min(1.0, float(alpha_var.get())))
-            self._apply_alpha(WIN_ALPHA)
-
-            self.app_config["app_settings"] = {
-                "docs_path": DOCS, "crit_sound_file": CRIT_SOUND_FILE,
-                "update_interval_ms": UPDATE_INTERVAL_MS, "history_days": HISTORY_DAYS,
-                "max_modules": MAX_MODULES, "play_crit_sound": PLAY_CRIT_SOUND,
-                "win_alpha": WIN_ALPHA,
-            }
-            self.app_config["theme"] = selected_theme
-            self.app_theme           = selected_theme
-            self.fleet_webhook_url   = webhook_var.get().strip()
-            fleet_cfg_s = self.app_config.get("fleet", {})
-            fleet_cfg_s["webhook_url"] = self.fleet_webhook_url
-            self.app_config["fleet"] = fleet_cfg_s
-            self.save_config()
-            self._update_send_button_states()
-
             try:
-                x, y = dialog.winfo_x(), dialog.winfo_y()
-                self.app_config[config_key] = f"+{x}+{y}"
-            except Exception: pass
+                selected_theme  = theme_var.get()
+                theme_changed   = selected_theme != self.app_theme
+                selected_chars  = [cid for cid, v in char_vars.items() if v.get()]
+                self.save_visible_characters(selected_chars)
 
-            self.save_config()
-            self.config_dialog = None
-            self._enable_config_icon()
-            dialog.destroy()
-            if theme_changed:
-                apply_theme_colors(self.app_theme)
-                self.rebuild_all_ui()
+                DOCS             = docs_var.get().strip()
+                HISTORY_DAYS     = new_history
+                PLAY_CRIT_SOUND  = crit_sound_var.get()
+                WIN_ALPHA        = max(0.2, min(1.0, float(alpha_var.get())))
+                self._apply_alpha(WIN_ALPHA)
+
+                self.app_config["app_settings"] = {
+                    "docs_path": DOCS, "crit_sound_file": CRIT_SOUND_FILE,
+                    "update_interval_ms": UPDATE_INTERVAL_MS, "history_days": HISTORY_DAYS,
+                    "max_modules": MAX_MODULES, "play_crit_sound": PLAY_CRIT_SOUND,
+                    "win_alpha": WIN_ALPHA,
+                }
+                self.app_config["theme"] = selected_theme
+                self.app_theme           = selected_theme
+                self.fleet_webhook_url   = webhook_var.get().strip()
+                fleet_cfg_s = self.app_config.get("fleet", {})
+                fleet_cfg_s["webhook_url"] = self.fleet_webhook_url
+                self.app_config["fleet"] = fleet_cfg_s
+
+                try:
+                    x, y = dialog.winfo_x(), dialog.winfo_y()
+                    self.app_config[config_key] = f"+{x}+{y}"
+                except Exception: pass
+
+                if not self.save_config():
+                    config_path = os.path.abspath(CONFIG_FILE)
+                    err = getattr(self, '_last_save_error', 'Unknown error')
+                    messagebox.showerror("Save Failed",
+                        f"Could not write config file.\n\n"
+                        f"Path: {config_path}\n"
+                        f"Error: {err}\n\n"
+                        f"Make sure the folder is not read-only and the file is not locked by another program.",
+                        parent=dialog)
+                    return
+
+                self._update_send_button_states()
+                self.config_dialog = None
+                self._enable_config_icon()
+                dialog.destroy()
+                if theme_changed:
+                    apply_theme_colors(self.app_theme)
+                    self.rebuild_all_ui()
+
+            except Exception as e:
+                messagebox.showerror("Save Error",
+                    f"An unexpected error occurred while saving:\n\n{type(e).__name__}: {e}",
+                    parent=dialog)
 
         tk.Button(bottom, text="✔  SAVE", command=save_and_close,
                   bg=BG, fg=GREEN, font=("Consolas", 9, "bold"),
