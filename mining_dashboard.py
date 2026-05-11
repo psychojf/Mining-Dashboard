@@ -3749,7 +3749,7 @@ class MiningDashboard:
         # thin separator under title
         tk.Frame(main_frame, bg=BORDER, height=1).pack(fill="x")
 
-        # ── BODY (non-scrolling, fixed layout) ───────────────────────────
+        # ── BODY (fixed layout — char grid scrolls internally) ────────────
         body = tk.Frame(main_frame, bg=BG_PANEL, padx=18, pady=12)
         body.pack(fill="both", expand=True)
 
@@ -3779,12 +3779,12 @@ class MiningDashboard:
 
         def _make_toggle(parent, var, bg):
             box = tk.Label(parent, font=("Consolas", 12), cursor="hand2", bg=bg)
-            def _refresh():
+            def _refresh(*_args):
                 box.config(text="■", fg=CYAN) if var.get() else box.config(text="□", fg=DIM)
             def _toggle(e=None):
                 var.set(not var.get())
-                _refresh()
             box.bind("<Button-1>", _toggle)
+            var.trace_add("write", _refresh)
             _refresh()
             return box
 
@@ -3807,8 +3807,8 @@ class MiningDashboard:
                   bg=BG, fg=WHITE, font=("Consolas", 8, "bold"),
                   relief="flat", cursor="hand2", width=12).pack(side="left")
 
-        # character grid — scrollable canvas, 3 columns, capped height
-        GRID_MAX_H = 220
+        # character grid — scrollable canvas, 3 columns, 4 visible rows max
+        GRID_MAX_H = 110
         grid_outer = tk.Frame(body, bg=BG_PANEL)
         grid_outer.pack(fill="x", pady=(0, 2))
         grid_canvas = tk.Canvas(grid_outer, bg=BG_PANEL, highlightthickness=0,
