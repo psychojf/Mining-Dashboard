@@ -175,7 +175,7 @@ def apply_theme_colors(name):
     WHITE = t["TB"]
 
 # static geometry defaults
-DEFAULT_WIN_W = 280   # base window width for control hub
+DEFAULT_WIN_W = 420   # base window width for control hub
 DEFAULT_WIN_H = 320   # base window height
 
 # colors per character
@@ -845,7 +845,7 @@ class CharacterTracker:
         self.session_start_m3: float = 0.0
         self.session_elapsed_offset: float = 0.0
         self.session_active: bool = False
-        self.auto_stop_on_full: bool = True
+        self.auto_stop_on_full: bool = False
         self.last_mine_mono: float = 0.0
         self._rate_window: deque = deque()
 
@@ -937,18 +937,27 @@ class CharacterTracker:
 # Runs in a background thread; all UI calls are routed via root.after(0, …).
 # ---------------------------------------------------------------------------
 class _GamelogHandler(FileSystemEventHandler):
+    _DEBOUNCE_MS = 250
+
     def __init__(self, app):
         self._app = app
+        self._pending_id = None
+
+    def _schedule(self):
+        if self._pending_id is not None:
+            return
+        def _fire():
+            self._pending_id = None
+            self._app.update_loop()
+        self._pending_id = self._app.root.after(self._DEBOUNCE_MS, _fire)
 
     def on_modified(self, event):
-        # New bytes written to an existing log file
         if not event.is_directory:
-            self._app.root.after(0, self._app.update_loop)
+            self._app.root.after(0, self._schedule)
 
     def on_created(self, event):
-        # EVE started a new session log — need to pick up the new file path
         if not event.is_directory:
-            self._app.root.after(0, self._app.update_loop)
+            self._app.root.after(0, self._schedule)
 
 
 # Contrôleur principal de l'application : GUI Tkinter, lecture des logs EVE et état global
@@ -1003,6 +1012,7 @@ class MiningDashboard:
         self._glob_cache: List[str] = []
         self._glob_cache_time: float = 0.0
         self._glob_cache_ttl: float = 5.0
+        self._latest_log_index: Optional[Dict[str, str]] = None
         self._history_cache = None          # (per_char_ores, per_char_m3, combined_m3, days)
         self._history_cache_time: float = 0.0
     
@@ -1029,6 +1039,43 @@ class MiningDashboard:
         self.update_loop_running = True
 
         self.setup_ui()
+
+        if self.app_config.get("win_rolled_up", False):
+            saved_geom = self.app_config.get("win_geom", "")
+            if saved_geom and 'x' in saved_geom:
+                try:
+                    parts = saved_geom.split('+')
+                    size_part = parts[0]
+                    w_px = int(size_part.split('x')[0])
+                    self._full_height = int(size_part.split('x')[1])
+                    x_pos = int(parts[1])
+                    y_pos = int(parts[2])
+                    self._saved_rollup_pos = (w_px, x_pos, y_pos)
+                except (ValueError, IndexError):
+                    self._saved_rollup_pos = None
+            else:
+                self._saved_rollup_pos = None
+                self._full_height = DEFAULT_WIN_H
+            self.root.update_idletasks()
+            children = self.inner_frame.winfo_children()
+            content_widgets = children[1:]
+            self._hidden_widgets = []
+            for widget in content_widgets:
+                try:
+                    widget._rollup_pack_info = widget.pack_info()
+                    self._hidden_widgets.append(widget)
+                except Exception:
+                    widget._rollup_pack_info = None
+                widget.pack_forget()
+            collapsed_h = 38
+            if self._saved_rollup_pos:
+                w_px, x_pos, y_pos = self._saved_rollup_pos
+                self.root.geometry(f"{w_px}x{collapsed_h}+{x_pos}+{y_pos}")
+                self.root.minsize(w_px, collapsed_h)
+                self.root.maxsize(w_px, collapsed_h)
+            else:
+                self.root.geometry(f"{DEFAULT_WIN_W}x{collapsed_h}")
+            self._is_rolled_up = True
 
         self.sync_floating_windows()
         
@@ -1066,10 +1113,16 @@ class MiningDashboard:
     def rebuild_all_ui(self):
         """Called when themes change to regenerate all colors dynamically"""
         # Save geometries before destroying windows
-        self.app_config["win_geom"] = self.root.winfo_geometry()
+        self.app_config["win_geom"] = self._get_full_win_geom()
         for cid, top in self.floating_windows.items():
             if top.winfo_exists():
-                self.app_config.setdefault("detached_geoms", {})[cid] = top.geometry()
+                if getattr(top, "_is_collapsed", False) and top._full_height > 0:
+                    w_px = top.winfo_width()
+                    x_pos = top.winfo_x()
+                    y_pos = top.winfo_y()
+                    self.app_config.setdefault("detached_geoms", {})[cid] = f"{w_px}x{top._full_height}+{x_pos}+{y_pos}"
+                else:
+                    self.app_config.setdefault("detached_geoms", {})[cid] = top.geometry()
         
         if self.history_window and self.history_window.winfo_exists():
             self.app_config["history_win_geom"] = self.history_window.geometry()
@@ -1215,15 +1268,58 @@ class MiningDashboard:
             y = top.winfo_y() + event.y - drag_data["y"]
             top.geometry(f"+{x}+{y}")
 
-        def reset_size(event):
-            top._user_resized = False
-            top.geometry("")
+        top._is_collapsed = False
+        top._full_height = 0
+        top._hidden_widgets = []
+
+        def toggle_collapse(event=None):
+            if event and isinstance(event.widget, tk.Label) and event.widget.cget("cursor") == "hand2":
+                return
+            if top._is_collapsed:
+                for w in top._hidden_widgets:
+                    info = getattr(w, "_saved_pack", None)
+                    if info:
+                        try: w.pack(**info)
+                        except Exception: w.pack(fill="both", expand=True)
+                g = getattr(top, "_grip", None)
+                if g:
+                    g.place(relx=1.0, rely=1.0, anchor="se")
+                if top._full_height > 0:
+                    w_px = top.winfo_width()
+                    x_pos = top.winfo_x()
+                    y_pos = top.winfo_y()
+                    top.geometry(f"{w_px}x{top._full_height}+{x_pos}+{y_pos}")
+                top._hidden_widgets = []
+                top._is_collapsed = False
+            else:
+                top._full_height = top.winfo_height()
+                children = top.winfo_children()
+                top._hidden_widgets = []
+                for w in children:
+                    if w is top_bar:
+                        continue
+                    try:
+                        w._saved_pack = w.pack_info()
+                        top._hidden_widgets.append(w)
+                    except Exception:
+                        w._saved_pack = None
+                    w.pack_forget()
+                g = getattr(top, "_grip", None)
+                if g:
+                    g.place_forget()
+                top.update_idletasks()
+                bar_h = top_bar.winfo_reqheight() + 4
+                w_px = top.winfo_width()
+                x_pos = top.winfo_x()
+                y_pos = top.winfo_y()
+                top.geometry(f"{w_px}x{bar_h}+{x_pos}+{y_pos}")
+                top._is_collapsed = True
 
         top_bar = tk.Frame(top, bg=BG_PANEL, cursor="fleur")
         top_bar.pack(fill="x")
         top_bar.bind("<Button-1>", start_drag)
         top_bar.bind("<B1-Motion>", do_drag)
-        top_bar.bind("<Double-Button-1>", reset_size)
+        top_bar.bind("<Double-Button-1>", toggle_collapse)
 
         try: idx = list(self.characters.keys()).index(char_id)
         except ValueError: idx = list(self.all_characters.keys()).index(char_id)
@@ -1233,7 +1329,7 @@ class MiningDashboard:
         title.pack(side="left", padx=5, pady=2)
         title.bind("<Button-1>", start_drag)
         title.bind("<B1-Motion>", do_drag)
-        title.bind("<Double-Button-1>", reset_size)
+        title.bind("<Double-Button-1>", toggle_collapse)
 
         def hide_character():
             # Withdraw the window and mark as hidden — does NOT remove from fleet/config
@@ -1264,6 +1360,7 @@ class MiningDashboard:
         # ---- RESIZE GRIP ----
         grip = tk.Label(top, text="◢", fg=DIM, bg=BG_PANEL, font=("Consolas", 10), cursor="sizing")
         grip.place(relx=1.0, rely=1.0, anchor="se")
+        top._grip = grip
 
         def start_resize(event):
             top._resize_x = event.x_root
@@ -1294,9 +1391,46 @@ class MiningDashboard:
             y = self.root.winfo_y() + 50 + (offset_i * 35)
             top.geometry(f"+{x}+{y}")
 
+        # ---- RESTORE COLLAPSED STATE (before window paints) ----
+        if char_id in self.app_config.get("collapsed_windows", []):
+            if saved_geom and 'x' in saved_geom:
+                try:
+                    size_part = saved_geom.split('+')[0]
+                    top._full_height = int(size_part.split('x')[1])
+                except (ValueError, IndexError):
+                    top._full_height = 0
+            top._hidden_widgets = []
+            for w in top.winfo_children():
+                if w is top_bar:
+                    continue
+                try:
+                    w._saved_pack = w.pack_info()
+                    top._hidden_widgets.append(w)
+                except Exception:
+                    w._saved_pack = None
+                w.pack_forget()
+            grip.place_forget()
+            bar_h = 28
+            w_px = 240
+            x_pos = 100
+            y_pos = 100
+            if saved_geom:
+                try:
+                    parts = saved_geom.split('+')
+                    w_px = int(parts[0].split('x')[0])
+                    x_pos = int(parts[1])
+                    y_pos = int(parts[2])
+                except (ValueError, IndexError): pass
+            top.geometry(f"{w_px}x{bar_h}+{x_pos}+{y_pos}")
+            top._is_collapsed = True
+
     # Reconstruit le panneau hub principal avec la liste des personnages et leurs boutons
     def rebuild_dashboard(self):
         self.hub_timers.clear()
+        self._fleet_total_lbl = None
+        self._fleet_theo_lbl = None
+        self._fleet_actual_lbl = None
+        self._fleet_isk_lbl = None
         if self.chars_container:
             for widget in self.chars_container.winfo_children():
                 widget.destroy()
@@ -1385,19 +1519,52 @@ class MiningDashboard:
                     self.rebuild_dashboard()
 
                 if is_hidden:
-                    btn = tk.Label(row_f, text="◉ SHOW", fg=GREEN, bg=BG_PANEL, font=("Consolas", 8, "bold"), cursor="hand2")
+                    btn = tk.Label(row_f, text="◉ SHOW", fg=GREEN, bg=BG_PANEL, font=("Consolas", 9, "bold"), cursor="hand2", padx=4)
                     btn.pack(side="right")
                     btn.bind("<Button-1>", lambda e, c=cid: show_window(c))
                     btn.bind("<Enter>", lambda e, b=btn: b.config(fg=WHITE))
                     btn.bind("<Leave>", lambda e, b=btn: b.config(fg=GREEN))
                 else:
-                    btn = tk.Label(row_f, text="◉ HIDE", fg=DIM, bg=BG_PANEL, font=("Consolas", 8, "bold"), cursor="hand2")
+                    btn = tk.Label(row_f, text="◉ HIDE", fg=DIM, bg=BG_PANEL, font=("Consolas", 9, "bold"), cursor="hand2", padx=4)
                     btn.pack(side="right")
                     btn.bind("<Button-1>", lambda e, c=cid: hide_window(c))
                     btn.bind("<Enter>", lambda e, b=btn: b.config(fg=RED))
                     btn.bind("<Leave>", lambda e, b=btn: b.config(fg=DIM))
 
+        self._rebuild_fleet_summary()
         # Intentionally removed the geometry snapping so it stays where you resized it!
+
+    def _rebuild_fleet_summary(self):
+        container = self.fleet_summary_container
+        for w in container.winfo_children():
+            w.destroy()
+
+        if not self.characters:
+            self._fleet_total_lbl = None
+            self._fleet_theo_lbl = None
+            self._fleet_actual_lbl = None
+            self._fleet_isk_lbl = None
+            return
+
+        tk.Frame(container, bg=BORDER, height=1).pack(fill="x", padx=5)
+        summary_frame = tk.Frame(container, bg=BG_PANEL, padx=8, pady=6)
+        summary_frame.pack(fill="x", padx=5, pady=(0, 2))
+
+        tk.Label(summary_frame, text="◆  FLEET SUMMARY", fg=CYAN, bg=BG_PANEL,
+                 font=("Consolas", 9, "bold")).pack(anchor="w", pady=(0, 3))
+
+        self._fleet_total_lbl = tk.Label(summary_frame, text="Total: 0.0 m3", fg=WHITE, bg=BG_PANEL,
+                                         font=("Consolas", 9), anchor="w")
+        self._fleet_total_lbl.pack(fill="x")
+        self._fleet_theo_lbl = tk.Label(summary_frame, text="◈ Theoretical: -- m3/s", fg=DIM, bg=BG_PANEL,
+                                        font=("Consolas", 9), anchor="w")
+        self._fleet_theo_lbl.pack(fill="x")
+        self._fleet_actual_lbl = tk.Label(summary_frame, text="◉ Actual: 0.00 m3/s", fg=DIM, bg=BG_PANEL,
+                                          font=("Consolas", 9), anchor="w")
+        self._fleet_actual_lbl.pack(fill="x")
+        self._fleet_isk_lbl = tk.Label(summary_frame, text="◈ Fleet: -- ISK/h", fg=DIM, bg=BG_PANEL,
+                                       font=("Consolas", 9), anchor="w")
+        self._fleet_isk_lbl.pack(fill="x")
 
     # Génère une icône simple (disque coloré) pour la barre système
     def create_tray_image(self):
@@ -1471,13 +1638,31 @@ class MiningDashboard:
             pattern = os.path.join(base_dir, '**', '*')
             self._glob_cache = [f for f in glob.glob(pattern, recursive=True) if f.lower().endswith('.txt')]
             self._glob_cache_time = now
+            self._latest_log_index = None
         return self._glob_cache
 
-    # Retourne le fichier log le plus récent pour un personnage donné
+    def _get_latest_log_index(self) -> Dict[str, str]:
+        self._get_cached_log_files()
+        if self._latest_log_index is not None:
+            return self._latest_log_index
+        index: Dict[str, str] = {}
+        mtime_cache: Dict[str, float] = {}
+        for f in self._glob_cache:
+            cid = self._get_char_id_from_file(f)
+            if not cid:
+                continue
+            try:
+                mt = os.path.getmtime(f)
+            except OSError:
+                continue
+            if cid not in mtime_cache or mt > mtime_cache[cid]:
+                mtime_cache[cid] = mt
+                index[cid] = f
+        self._latest_log_index = index
+        return index
+
     def _get_latest_log_for_char(self, char_id: str) -> Optional[str]:
-        files = self._get_cached_log_files()
-        char_files = [f for f in files if self._get_char_id_from_file(f) == char_id]
-        return max(char_files, key=os.path.getmtime) if char_files else None
+        return self._get_latest_log_index().get(char_id)
 
     # Enregistre la position initiale pour le glissement de la fenêtre principale
     def _start_drag(self, event):
@@ -1624,14 +1809,18 @@ class MiningDashboard:
         self.pin_icon.bind("<Enter>", lambda e: self.pin_icon.config(bg="#1a2332"))
         self.pin_icon.bind("<Leave>", lambda e: self.pin_icon.config(bg=BG))
 
-        # Pack the history button FIRST and anchor it to the bottom so it never gets clipped
+        # Pack bottom elements FIRST (bottom-up) so they never get clipped
         self.history_button = tk.Button(
             self.inner_frame, text="◈ HISTORY", command=self.show_history, bg=BG_PANEL, fg=CYAN,
             font=("Consolas", 9, "bold"), relief="flat", cursor="hand2", activebackground=BORDER, activeforeground=CYAN
         )
-        self.history_button.pack(side="bottom", fill="x", padx=20, pady=(12, 15))
+        self.history_button.pack(side="bottom", fill="x", padx=20, pady=(6, 15))
 
-        # Pack the character container SECOND so it dynamically shrinks to fit the remaining space
+        # Fleet summary — pinned above HISTORY, always visible
+        self.fleet_summary_container = tk.Frame(self.inner_frame, bg=BG)
+        self.fleet_summary_container.pack(side="bottom", fill="x")
+
+        # Pack the character container LAST so it dynamically shrinks to fit the remaining space
         self.chars_container = tk.Frame(self.inner_frame, bg=BG)
         self.chars_container.pack(side="top", fill="both", expand=True, padx=5, pady=(5, 0))
 
@@ -1650,12 +1839,12 @@ class MiningDashboard:
         def do_resize(event):
             dx = event.x_root - self._resize_x
             dy = event.y_root - self._resize_y
-            new_w = max(240, self._orig_width + dx)
+            new_w = max(420, self._orig_width + dx)
             new_h = max(200, self._orig_height + dy)
             self.root.geometry(f"{new_w}x{new_h}")
 
         def end_resize(event):
-            self.app_config["win_geom"] = self.root.winfo_geometry()
+            self.app_config["win_geom"] = self._get_full_win_geom()
             self.save_config()
 
         grip.bind("<Button-1>", start_resize)
@@ -2583,7 +2772,8 @@ class MiningDashboard:
 
     # Sauvegarde la configuration actuelle dans le fichier JSON
     def save_config(self) -> bool:
-        self.app_config["win_geom"] = self.root.winfo_geometry()
+        self.app_config["win_geom"] = self._get_full_win_geom()
+        self.app_config["win_rolled_up"] = self._is_rolled_up
         try:
             with open(CONFIG_FILE, "w") as f:
                 json.dump(self.app_config, f, indent=2)
@@ -2591,6 +2781,14 @@ class MiningDashboard:
         except Exception as e:
             self._last_save_error = str(e)
             return False
+
+    def _get_full_win_geom(self) -> str:
+        if self._is_rolled_up and self._full_height > 0:
+            w = self.root.winfo_width()
+            x = self.root.winfo_x()
+            y = self.root.winfo_y()
+            return f"{w}x{self._full_height}+{x}+{y}"
+        return self.root.winfo_geometry()
 
     # Fermeture propre : sauvegarde la géométrie/config, arrête le tray et quitte
     def on_close(self) -> None:
@@ -2610,10 +2808,20 @@ class MiningDashboard:
         if getattr(self, 'history_window', None) and self.history_window.winfo_exists():
             self.on_history_close()
         
+        collapsed_chars = []
         for cid, top in self.floating_windows.items():
             if top.winfo_exists():
-                self.app_config.setdefault("detached_geoms", {})[cid] = top.geometry()
-                
+                if getattr(top, "_is_collapsed", False):
+                    collapsed_chars.append(cid)
+                    if top._full_height > 0:
+                        w_px = top.winfo_width()
+                        x_pos = top.winfo_x()
+                        y_pos = top.winfo_y()
+                        self.app_config.setdefault("detached_geoms", {})[cid] = f"{w_px}x{top._full_height}+{x_pos}+{y_pos}"
+                else:
+                    self.app_config.setdefault("detached_geoms", {})[cid] = top.geometry()
+        self.app_config["collapsed_windows"] = collapsed_chars
+
         self.save_config()
         try: self.root.destroy()
         except Exception: pass
@@ -2629,16 +2837,23 @@ class MiningDashboard:
                     tracker.log_path = latest_log
                     tracker.log_pos = 0
 
-                if tracker.log_path and os.path.exists(tracker.log_path):
-                    try:
-                        with open(tracker.log_path, "r", encoding="utf-8-sig", errors="ignore") as f:
-                            f.seek(tracker.log_pos)
-                            new_data = f.read()
-                            new_pos = f.tell()
-                            if new_data:
-                                self._process_log_data(tracker, new_data)
-                            tracker.log_pos = new_pos
-                    except Exception: pass
+                if not tracker.log_path:
+                    continue
+                try:
+                    size = os.path.getsize(tracker.log_path)
+                except OSError:
+                    continue
+                if size <= tracker.log_pos:
+                    continue
+                try:
+                    with open(tracker.log_path, "r", encoding="utf-8-sig", errors="ignore") as f:
+                        f.seek(tracker.log_pos)
+                        new_data = f.read()
+                        new_pos = f.tell()
+                        if new_data:
+                            self._process_log_data(tracker, new_data)
+                        tracker.log_pos = new_pos
+                except Exception: pass
             self._update_ui_labels()
         except Exception: pass
         # No reschedule here — _GamelogHandler.on_modified/on_created calls
@@ -2839,6 +3054,48 @@ class MiningDashboard:
                 lbl.config(text=f"{h:02d}:{m:02d}:{s:02d}")
             else:
                 lbl.config(text="--:--:--")
+
+        # ── Fleet summary labels ────────────────────────────────────────────
+        if self._fleet_total_lbl:
+            fleet_m3 = 0.0
+            fleet_theo = 0.0
+            fleet_actual = 0.0
+            fleet_isk = 0.0
+            has_isk = False
+            now_mono = time.monotonic()
+            cutoff = now_mono - RATE_WINDOW_SEC
+
+            for tracker in self.characters.values():
+                fleet_m3 += tracker.total_m3 - tracker.session_start_m3
+                fleet_theo += tracker.get_total_theoretical_m3_per_sec()
+
+                if tracker.session_active:
+                    while tracker._rate_window and tracker._rate_window[0][0] < cutoff:
+                        tracker._rate_window.popleft()
+                    if tracker._rate_window:
+                        window_m3 = sum(m3 for _, m3 in tracker._rate_window)
+                        denom = min(tracker.get_session_active_duration(), RATE_WINDOW_SEC)
+                        if denom > 5:
+                            fleet_actual += window_m3 / denom
+
+                isk_h = self._get_isk_per_hour(tracker)
+                if isk_h is not None:
+                    fleet_isk += isk_h
+                    has_isk = True
+
+            self._fleet_total_lbl.config(text=f"Total: {fleet_m3:,.1f} m3")
+            if fleet_theo > 0:
+                self._fleet_theo_lbl.config(text=f"◈ Theoretical: {fleet_theo:.2f} m3/s ({fleet_theo * 3600:,.0f} m3/hr)", fg=WHITE)
+            else:
+                self._fleet_theo_lbl.config(text="◈ Theoretical: -- m3/s", fg=DIM)
+            if fleet_actual > 0:
+                self._fleet_actual_lbl.config(text=f"◉ Actual: {fleet_actual:.2f} m3/s ({fleet_actual * 3600:,.0f} m3/hr)", fg=WHITE)
+            else:
+                self._fleet_actual_lbl.config(text="◉ Actual: 0.00 m3/s", fg=DIM)
+            if has_isk:
+                self._fleet_isk_lbl.config(text=f"◈ Fleet: {fleet_isk / 1_000_000:.2f} M ISK/h", fg=GOLD)
+            else:
+                self._fleet_isk_lbl.config(text="◈ Fleet: -- ISK/h", fg=DIM)
 
     # Joue le son d'alerte critique et envoie une notification bureau si disponible
     def trigger_crit_alert(self) -> None:
