@@ -65,7 +65,7 @@ AUTO_PAUSE_KEYWORDS = [
 ]
 
 # ---------------------------------------------------------------------------
-# THEME ENGINE (Imported from Ratting Dashboard)
+# THEME ENGINE 
 # ---------------------------------------------------------------------------
 # Éclaircit une couleur hex par un montant fixe
 def _lighten(hx, amt):
@@ -121,28 +121,31 @@ THEMES = {
         "C_MSN": "#5b9bd5", "C_ALERT": "#e07040",
         "C_ESCAL": "#d4b45d", "C_ANOM": "#5b8fa8",
     },
-    "Caldari":                  _gen_theme("#191919", "#3C5F73"),
-    "Caldari II":               _gen_theme("#0F1114", "#8A8F9A"),
-    "Minmatar":                 _gen_theme("#161414", "#5A3737"),
-    "Minmatar II":              _gen_theme("#140D0F", "#8C5055"),
-    "Amarr":                    _gen_theme("#191714", "#BBA183"),
+    "Amarr":                    _gen_theme("#120A00", "#FBC345"),
     "Amarr II":                 _gen_theme("#12110A", "#9A6928"),
-    "Gallente":                 _gen_theme("#0F1414", "#576866"),
-    "Gallente II":              _gen_theme("#0A0F0F", "#9EAE95"),
-    "Guristas Pirates":         _gen_theme("#261500", "#FF9100"),
-    "Blood Raiders":            _gen_theme("#260505", "#BE0000"),
+    "Caldari":                  _gen_theme("#001926", "#5E7294"),
+    "Caldari II":               _gen_theme("#001926", "#3680EE"),
+    "Gallente":                 _gen_theme("#011200", "#12E700"),
+    "Gallente II":              _gen_theme("#011200", "#9EAE95"),
+    "Minmatar":                 _gen_theme("#0E0700", "#FF3800"),
+    "Minmatar II":              _gen_theme("#0E0700", "#AB2500"),
     "Angel Cartel":             _gen_theme("#26110E", "#FF4D00"),
-    "Serpentis":                _gen_theme("#060A0C", "#BBC400"),
-    "Sansha's Nation":          _gen_theme("#0a0a0a", "#218000"),
-    "Triglavian Collective":    _gen_theme("#262218", "#DE1400"),
-    "Sisters of EVE":           _gen_theme("#262626", "#B60000"),
-    "EDENCOM":                  _gen_theme("#001926", "#039DFF"),
-    "Intaki Syndicate":         _gen_theme("#060A0C", "#393780"),
-    "ORE":                      _gen_theme("#1A1A1A", "#D9A600"),
-    "Mordu's Legion":           _gen_theme("#1A1F22", "#4B6B78"),
-    "Thukker Tribe":            _gen_theme("#1F1A17", "#B35900"),
+    "Arkombine":                _gen_theme("#0A0600", "#FF8200"),
+    "Blood Raiders":            _gen_theme("#260505", "#BE0000"),
     "CONCORD":                  _gen_theme("#0A1428", "#0088FF"),
+    "Deathless Circle":         _gen_theme("#260B00", "#1890FF"),
+    "EDENCOM":                  _gen_theme("#001926", "#039DFF"),
+    "Guristas Pirates":         _gen_theme("#261500", "#FF9100"),
+    "Intaki Syndicate":         _gen_theme("#060A0C", "#97AA00"),
+    "Mordu's Legion":           _gen_theme("#1A1F22", "#4B6B78"),
+    "ORE":                      _gen_theme("#1A1A1A", "#D9A600"),
+    "Sansha's Nation":          _gen_theme("#000000", "#218000"),
+    "Serpentis":                _gen_theme("#060A0C", "#BBC400"),
+    "Sisters of EVE":           _gen_theme("#262626", "#E20000"),
     "Society of Conscious Thought": _gen_theme("#0A111A", "#00E8FF"),
+    "Thukker Tribe":            _gen_theme("#1F1A17", "#B35900"),
+    "Triglavian Collective":    _gen_theme("#262218", "#DE1400"),
+    "Upwell Consortium":        _gen_theme("#1A1A1A", "#C8A820"),
 }
 THEME_NAMES = list(THEMES.keys())
 
@@ -219,7 +222,7 @@ def draw_neon_bar(canvas, pct, bar_color=None, glow=True, segments=True):
 
 # ---------------------------------------------------------------------------
 # ORE / ICE / GAS DATA  (SDE-aware, auto-updatable)
-# Source: EVE Online SDE build 3300615 (Apr 15, 2026)
+# Source: EVE Online SDE build 3346029 (May 18, 2026)
 # ---------------------------------------------------------------------------
 ORE_DATA_CACHE_FILE = "ore_data_cache.json"
 SDE_LATEST_URL = "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip"
@@ -231,7 +234,7 @@ SDE_SKIP_GROUPS = {
     "AIR Ore Asteroid Resources"
 }
 
-# Source: EVE Online SDE build 3300615 (Apr 15, 2026)
+# Source: EVE Online SDE build 3346029 (May 18, 2026)
 # To update before building the exe, run ore_data.py and copy its _SEED_VOLUMES /
 # _build_seed_ratios() output into these two dicts.
 _DEFAULT_ORE_VOLUMES: Dict[str, float] = {
@@ -636,6 +639,53 @@ def download_and_parse_sde(progress_callback=None):
         if progress_callback: progress_callback("Parsing ore data...")
         return _parse_sde_ore_data(extract_dir)
 
+def _sde_needs_update() -> bool:
+    """HEAD-check the SDE zip to see if it's newer than our cache."""
+    cached = _load_ore_data_from_cache()
+    if not cached or "updated_at" not in cached:
+        return True
+    try:
+        req = urllib.request.Request(SDE_LATEST_URL, method="HEAD",
+                                     headers={"User-Agent": "EVE-Mining-Dashboard/1.0"})
+        resp = urllib.request.urlopen(req, timeout=15)
+        last_mod = resp.headers.get("Last-Modified", "")
+        if not last_mod:
+            return False
+        from email.utils import parsedate_to_datetime
+        remote_dt = parsedate_to_datetime(last_mod)
+        cache_dt_str = cached["updated_at"]
+        cache_dt = datetime.strptime(cache_dt_str, "%Y-%m-%d %H:%M %Z").replace(tzinfo=timezone.utc)
+        return remote_dt > cache_dt
+    except Exception:
+        return False
+
+_sde_auto_update_result: Optional[Dict] = None
+_sde_auto_update_done = threading.Event()
+
+def _sde_auto_update_worker() -> None:
+    """Startup daemon: check if CCP published a newer SDE and silently refresh ore data."""
+    global ORE_VOLUMES, COMPRESSION_RATIOS, SDE_INFO, _sde_auto_update_result
+    if not SDE_AUTO_UPDATE:
+        _sde_auto_update_done.set()
+        return
+    try:
+        if not _sde_needs_update():
+            return
+        result = download_and_parse_sde()
+        _save_ore_data_cache(result)
+        ORE_VOLUMES = {k: float(v) for k, v in result["ore_volumes"].items()}
+        COMPRESSION_RATIOS = {k: int(v) for k, v in result["compression_ratios"].items()}
+        if "type_ids" in result:
+            ORE_TYPE_IDS.update({k: int(v) for k, v in result["type_ids"].items()})
+        SDE_INFO["version"] = result.get("sde_version", "auto-updated")
+        SDE_INFO["updated_at"] = result.get("updated_at", "now")
+        SDE_INFO["ore_count"] = str(result.get("ore_count", len(ORE_VOLUMES)))
+        _sde_auto_update_result = result
+    except Exception as e:
+        print(f"[sde-auto-update] failed: {e}")
+    finally:
+        _sde_auto_update_done.set()
+
 ORE_VOLUMES: Dict[str, float] = {}
 COMPRESSION_RATIOS: Dict[str, int] = {}
 SDE_INFO: Dict[str, str] = {"version": "built-in", "updated_at": "n/a", "ore_count": "0"}
@@ -686,7 +736,8 @@ LOG_TIMESTAMP = re.compile(r'^\[\s*(\d{4}\.\d{2}\.\d{2})\s+\d{2}:\d{2}:\d{2}\s*\
 # SDE download progress messages embed a percentage like "(34%)" — pre-compiled to avoid
 # creating a new pattern object on every progress callback invocation
 SDE_PROGRESS_PCT = re.compile(r'\((?P<pct>\d+)%\)')
-AUTO_PAUSE_SECONDS = 120   # auto-pause if no mine event for this many seconds
+SDE_AUTO_UPDATE = True
+AUTO_PAUSE_SECONDS_DEFAULT = 120   # fallback auto-pause if cycle time unknown
 RATE_WINDOW_SEC    = 120   # rolling window width for m³/s rate display
 
 _ORE_CATEGORIES = {
@@ -845,7 +896,6 @@ class CharacterTracker:
         self.session_start_m3: float = 0.0
         self.session_elapsed_offset: float = 0.0
         self.session_active: bool = False
-        self.auto_stop_on_full: bool = False
         self.last_mine_mono: float = 0.0
         self._rate_window: deque = deque()
 
@@ -937,7 +987,7 @@ class CharacterTracker:
 # Runs in a background thread; all UI calls are routed via root.after(0, …).
 # ---------------------------------------------------------------------------
 class _GamelogHandler(FileSystemEventHandler):
-    _DEBOUNCE_MS = 250
+    _DEBOUNCE_MS = 500
 
     def __init__(self, app):
         self._app = app
@@ -1089,6 +1139,9 @@ class MiningDashboard:
         _t = threading.Thread(target=_esi_price_thread_worker, daemon=True, name="esi-price-thread")
         _t.start()
 
+        threading.Thread(target=_sde_auto_update_worker, daemon=True, name="sde-auto-update").start()
+        self.root.after(5000, self._check_sde_auto_update)
+
         self.update_loop()
 
         # Start watching the gamelog directory for file changes; this replaces
@@ -1105,6 +1158,7 @@ class MiningDashboard:
                 print(f"[error] MiningDashboard.__init__: watchdog failed to start on {_gamelog_dir}: {_e}")
 
         self.root.after(30_000, self._auto_pause_tick)
+        self._ui_refresh_tick()
         self.root.deiconify()
         self.root.after(10, self.set_app_window)
         self.root.mainloop()
@@ -1206,6 +1260,7 @@ class MiningDashboard:
     def save_visible_characters(self, visible_char_ids: List[str]):
         previous = set(self.app_config.get("visible_characters", []) or [])
         newly_added = set(visible_char_ids) - previous
+        removed = previous - set(visible_char_ids)
         self.app_config["visible_characters"] = visible_char_ids
         self.save_config()
         self.characters = self.get_visible_characters()
@@ -1213,8 +1268,9 @@ class MiningDashboard:
             self.hidden_windows.add(cid)
         if newly_added:
             self._save_hidden_windows()
-        self.sync_floating_windows()
-        self.rebuild_dashboard()
+        if newly_added or removed:
+            self.sync_floating_windows()
+            self.rebuild_dashboard()
 
     # Persiste l'état des fenêtres masquées dans la config pour survivre aux redémarrages
     def _save_hidden_windows(self):
@@ -1271,24 +1327,30 @@ class MiningDashboard:
         top._is_collapsed = False
         top._full_height = 0
         top._hidden_widgets = []
+        top._last_toggle_time = 0.0
 
         def toggle_collapse(event=None):
             if event and isinstance(event.widget, tk.Label) and event.widget.cget("cursor") == "hand2":
                 return
+            now = time.time()
+            if now - top._last_toggle_time < 0.5:
+                return
+            top._last_toggle_time = now
             if top._is_collapsed:
                 for w in top._hidden_widgets:
                     info = getattr(w, "_saved_pack", None)
                     if info:
                         try: w.pack(**info)
                         except Exception: w.pack(fill="both", expand=True)
-                g = getattr(top, "_grip", None)
-                if g:
-                    g.place(relx=1.0, rely=1.0, anchor="se")
                 if top._full_height > 0:
                     w_px = top.winfo_width()
                     x_pos = top.winfo_x()
                     y_pos = top.winfo_y()
                     top.geometry(f"{w_px}x{top._full_height}+{x_pos}+{y_pos}")
+                top.update_idletasks()
+                g = getattr(top, "_grip", None)
+                if g:
+                    g.place(relx=1.0, rely=1.0, anchor="se")
                 top._hidden_widgets = []
                 top._is_collapsed = False
             else:
@@ -1315,7 +1377,7 @@ class MiningDashboard:
                 top.geometry(f"{w_px}x{bar_h}+{x_pos}+{y_pos}")
                 top._is_collapsed = True
 
-        top_bar = tk.Frame(top, bg=BG_PANEL, cursor="fleur")
+        top_bar = tk.Frame(top, bg=BG, cursor="fleur")
         top_bar.pack(fill="x")
         top_bar.bind("<Button-1>", start_drag)
         top_bar.bind("<B1-Motion>", do_drag)
@@ -1325,21 +1387,19 @@ class MiningDashboard:
         except ValueError: idx = list(self.all_characters.keys()).index(char_id)
         accent = CHAR_ACCENTS[idx % len(CHAR_ACCENTS)]
 
-        title = tk.Label(top_bar, text=f"★ {tracker.char_name.upper()}", fg=accent, bg=BG_PANEL, font=("Consolas", 9, "bold"))
+        title = tk.Label(top_bar, text=f"★ {tracker.char_name.upper()}", fg=accent, bg=BG, font=("Consolas", 9, "bold"))
         title.pack(side="left", padx=5, pady=2)
         title.bind("<Button-1>", start_drag)
         title.bind("<B1-Motion>", do_drag)
         title.bind("<Double-Button-1>", toggle_collapse)
 
         def hide_character():
-            # Withdraw the window and mark as hidden — does NOT remove from fleet/config
-            # To remove from fleet entirely, use the Config UI checkbox
             top.withdraw()
             self.hidden_windows.add(char_id)
             self._save_hidden_windows()
-            self.rebuild_dashboard()  # refresh hub row button to show SHOW
+            self.rebuild_dashboard()
 
-        close_btn = tk.Label(top_bar, text="✕", fg=DIM, bg=BG_PANEL, font=("Consolas", 12, "bold"), cursor="hand2")
+        close_btn = tk.Label(top_bar, text="✕", fg=DIM, bg=BG, font=("Consolas", 12, "bold"), cursor="hand2")
         close_btn.pack(side="right", padx=(0, 5))
         close_btn.bind("<Button-1>", lambda e: hide_character())
         close_btn.bind("<Enter>", lambda e, b=close_btn: b.config(fg=RED))
@@ -1358,7 +1418,7 @@ class MiningDashboard:
             widgets['start_stop_btn'].config(text="■ STOP", fg=RED)
 
         # ---- RESIZE GRIP ----
-        grip = tk.Label(top, text="◢", fg=DIM, bg=BG_PANEL, font=("Consolas", 10), cursor="sizing")
+        grip = tk.Label(top, text="◢", fg=DIM, bg=BG, font=("Consolas", 10), cursor="sizing")
         grip.place(relx=1.0, rely=1.0, anchor="se")
         top._grip = grip
 
@@ -1458,10 +1518,10 @@ class MiningDashboard:
             hub_outer.pack(fill="both", expand=True, padx=5, pady=(0, 10))
             
             # Removed static height, letting it expand dynamically based on window size
-            char_canvas = tk.Canvas(hub_outer, bg=BG_PANEL, highlightthickness=0)
+            char_canvas = tk.Canvas(hub_outer, bg=BG, highlightthickness=0)
             char_scrollbar = tk.Scrollbar(hub_outer, orient="vertical", command=char_canvas.yview)
             
-            hub_frame = tk.Frame(char_canvas, bg=BG_PANEL)
+            hub_frame = tk.Frame(char_canvas, bg=BG)
             char_window = char_canvas.create_window((0, 0), window=hub_frame, anchor="nw")
             
             def on_frame_configure(event):
@@ -1488,12 +1548,12 @@ class MiningDashboard:
                 accent = CHAR_ACCENTS[idx % len(CHAR_ACCENTS)]
                 
                 # TIGHT padding
-                row_f = tk.Frame(hub_frame, bg=BG_PANEL, padx=4, pady=0)
+                row_f = tk.Frame(hub_frame, bg=BG, padx=4, pady=0)
                 row_f.pack(fill="x", pady=0)
-                
-                tk.Label(row_f, text=f"★ {tracker.char_name.upper()}", fg=accent, bg=BG_PANEL, font=("Consolas", 10, "bold")).pack(side="left")
 
-                timer_lbl = tk.Label(row_f, text="--:--:--", fg=accent, bg=BG_PANEL, font=("Consolas", 11, "bold"))
+                tk.Label(row_f, text=f"★ {tracker.char_name.upper()}", fg=accent, bg=BG, font=("Consolas", 10, "bold")).pack(side="left")
+
+                timer_lbl = tk.Label(row_f, text="--:--:--", fg=accent, bg=BG, font=("Consolas", 11, "bold"))
                 timer_lbl.pack(side="left", padx=(10, 0))
                 self.hub_timers[cid] = timer_lbl
 
@@ -1519,13 +1579,13 @@ class MiningDashboard:
                     self.rebuild_dashboard()
 
                 if is_hidden:
-                    btn = tk.Label(row_f, text="◉ SHOW", fg=GREEN, bg=BG_PANEL, font=("Consolas", 9, "bold"), cursor="hand2", padx=4)
+                    btn = tk.Label(row_f, text="◉ SHOW", fg=GREEN, bg=BG, font=("Consolas", 9, "bold"), cursor="hand2", padx=4)
                     btn.pack(side="right")
                     btn.bind("<Button-1>", lambda e, c=cid: show_window(c))
                     btn.bind("<Enter>", lambda e, b=btn: b.config(fg=WHITE))
                     btn.bind("<Leave>", lambda e, b=btn: b.config(fg=GREEN))
                 else:
-                    btn = tk.Label(row_f, text="◉ HIDE", fg=DIM, bg=BG_PANEL, font=("Consolas", 9, "bold"), cursor="hand2", padx=4)
+                    btn = tk.Label(row_f, text="◉ HIDE", fg=DIM, bg=BG, font=("Consolas", 9, "bold"), cursor="hand2", padx=4)
                     btn.pack(side="right")
                     btn.bind("<Button-1>", lambda e, c=cid: hide_window(c))
                     btn.bind("<Enter>", lambda e, b=btn: b.config(fg=RED))
@@ -1547,22 +1607,22 @@ class MiningDashboard:
             return
 
         tk.Frame(container, bg=BORDER, height=1).pack(fill="x", padx=5)
-        summary_frame = tk.Frame(container, bg=BG_PANEL, padx=8, pady=6)
+        summary_frame = tk.Frame(container, bg=BG, padx=8, pady=6)
         summary_frame.pack(fill="x", padx=5, pady=(0, 2))
 
-        tk.Label(summary_frame, text="◆  FLEET SUMMARY", fg=CYAN, bg=BG_PANEL,
+        tk.Label(summary_frame, text="◆  FLEET SUMMARY", fg=CYAN, bg=BG,
                  font=("Consolas", 9, "bold")).pack(anchor="w", pady=(0, 3))
 
-        self._fleet_total_lbl = tk.Label(summary_frame, text="Total: 0.0 m3", fg=WHITE, bg=BG_PANEL,
+        self._fleet_total_lbl = tk.Label(summary_frame, text="Total: 0.0 m3", fg=WHITE, bg=BG,
                                          font=("Consolas", 9), anchor="w")
         self._fleet_total_lbl.pack(fill="x")
-        self._fleet_theo_lbl = tk.Label(summary_frame, text="◈ Theoretical: -- m3/s", fg=DIM, bg=BG_PANEL,
+        self._fleet_theo_lbl = tk.Label(summary_frame, text="◈ Theoretical: -- m3/s", fg=DIM, bg=BG,
                                         font=("Consolas", 9), anchor="w")
         self._fleet_theo_lbl.pack(fill="x")
-        self._fleet_actual_lbl = tk.Label(summary_frame, text="◉ Actual: 0.00 m3/s", fg=DIM, bg=BG_PANEL,
+        self._fleet_actual_lbl = tk.Label(summary_frame, text="◉ Actual: 0.00 m3/s", fg=DIM, bg=BG,
                                           font=("Consolas", 9), anchor="w")
         self._fleet_actual_lbl.pack(fill="x")
-        self._fleet_isk_lbl = tk.Label(summary_frame, text="◈ Fleet: -- ISK/h", fg=DIM, bg=BG_PANEL,
+        self._fleet_isk_lbl = tk.Label(summary_frame, text="◈ Fleet: -- ISK/h", fg=DIM, bg=BG,
                                        font=("Consolas", 9), anchor="w")
         self._fleet_isk_lbl.pack(fill="x")
 
@@ -1719,6 +1779,8 @@ class MiningDashboard:
         if self._is_rolled_up:
             # Expand: restore all hidden content widgets using their saved pack options
             for widget in self._hidden_widgets:
+                if not widget.winfo_exists():
+                    continue
                 info = getattr(widget, "_rollup_pack_info", None)
                 if info:
                     try:
@@ -1740,9 +1802,17 @@ class MiningDashboard:
             self._hidden_widgets = []
             self._is_rolled_up = False
 
+            g = getattr(self, "_main_grip", None)
+            if g:
+                g.place(relx=1.0, rely=1.0, anchor="se")
+
         else:
             # Collapse: hide all content widgets below the title bar
             self._full_height = self.root.winfo_height()
+
+            g = getattr(self, "_main_grip", None)
+            if g:
+                g.place_forget()
 
             self._hidden_widgets = []
             for widget in content_widgets:
@@ -1827,8 +1897,9 @@ class MiningDashboard:
         self.rebuild_dashboard()
 
         # Add Resize Grip for the Main UI Controller
-        grip = tk.Label(self.root, text="◢", fg=DIM, bg=BG, font=("Consolas", 10), cursor="sizing")
-        grip.place(relx=1.0, rely=1.0, anchor="se")
+        self._main_grip = tk.Label(self.root, text="◢", fg=DIM, bg=BG, font=("Consolas", 10), cursor="sizing")
+        self._main_grip.place(relx=1.0, rely=1.0, anchor="se")
+        grip = self._main_grip
 
         def start_resize(event):
             self._resize_x = event.x_root
@@ -1911,27 +1982,6 @@ class MiningDashboard:
 
         cycles_label = tk.Label(cargo_frame, text="Full in: --", fg=DIM, bg=BG_PANEL, font=("Consolas", 8))
         cycles_label.pack(anchor="w", pady=(2, 0))
-
-        _as_init_text = "⏸ Auto-Stop: ON" if tracker.auto_stop_on_full else "⏸ Auto-Stop: OFF"
-        _as_init_fg   = CYAN if tracker.auto_stop_on_full else DIM
-
-        def _toggle_auto_stop(cid=char_id):
-            t = self.all_characters[cid]
-            t.auto_stop_on_full = not t.auto_stop_on_full
-            self.save_ship_configs()
-            btn = self.char_widgets[cid].get('auto_stop_btn')
-            if btn:
-                btn.config(
-                    text="⏸ Auto-Stop: ON"  if t.auto_stop_on_full else "⏸ Auto-Stop: OFF",
-                    fg=CYAN                  if t.auto_stop_on_full else DIM,
-                )
-
-        auto_stop_btn = tk.Button(
-            cargo_frame, text=_as_init_text, command=_toggle_auto_stop,
-            bg=BG, fg=_as_init_fg, font=("Consolas", 7), relief="flat",
-            cursor="hand2", anchor="w",
-        )
-        auto_stop_btn.pack(anchor="w", pady=(1, 0))
 
         control_frame = tk.Frame(col_inner, bg=BG_PANEL)
         control_frame.pack(fill="x", pady=(5, 0))
@@ -2016,7 +2066,7 @@ class MiningDashboard:
             'copy_btn': copy_btn, 'send_btn': send_btn,
             'copy_tip': copy_tip, 'send_tip': send_tip,
             'cargo_text': cargo_text_label, 'cargo_canvas': cargo_canvas,
-            'cycles_label': cycles_label, 'auto_stop_btn': auto_stop_btn,
+            'cycles_label': cycles_label,
         }
         return col_outer, widgets
 
@@ -2727,7 +2777,7 @@ class MiningDashboard:
 
     # Restaure les paramètres sauvegardés (thème, transparence, topmost) depuis la config
     def _apply_saved_app_settings(self):
-        global DOCS, CRIT_SOUND_FILE, UPDATE_INTERVAL_MS, HISTORY_DAYS, CRITICAL_HIT_KEYWORD, PLAY_CRIT_SOUND, WIN_ALPHA
+        global DOCS, CRIT_SOUND_FILE, UPDATE_INTERVAL_MS, HISTORY_DAYS, CRITICAL_HIT_KEYWORD, PLAY_CRIT_SOUND, WIN_ALPHA, SDE_AUTO_UPDATE
         app_settings = self.app_config.get("app_settings", {})
         if not app_settings: return
         if "docs_path" in app_settings: DOCS = app_settings["docs_path"]
@@ -2736,9 +2786,36 @@ class MiningDashboard:
         if "history_days" in app_settings: HISTORY_DAYS = max(1, int(app_settings["history_days"]))
         if "crit_keyword" in app_settings: CRITICAL_HIT_KEYWORD = app_settings["crit_keyword"]
         if "play_crit_sound" in app_settings: PLAY_CRIT_SOUND = app_settings["play_crit_sound"]
+        if "sde_auto_update" in app_settings: SDE_AUTO_UPDATE = app_settings["sde_auto_update"]
         if "win_alpha" in app_settings:
             WIN_ALPHA = max(0.2, min(1.0, float(app_settings["win_alpha"])))
             self._apply_alpha(WIN_ALPHA)
+
+    def _check_sde_auto_update(self):
+        global _sde_auto_update_result
+        if not _sde_auto_update_done.is_set():
+            self.root.after(3000, self._check_sde_auto_update)
+            return
+        result = _sde_auto_update_result
+        _sde_auto_update_result = None
+        if result is None:
+            return
+        old_count = len(_DEFAULT_ORE_VOLUMES)
+        new_count = int(result.get("ore_count", 0))
+        new_ores = set(result.get("ore_volumes", {}).keys()) - set(_DEFAULT_ORE_VOLUMES.keys())
+        if new_ores:
+            msg = f"Ore database auto-updated: {new_count} ores (was {old_count}, +{len(new_ores)} new)"
+            print(f"[sde-auto-update] {msg}")
+            try:
+                from plyer import notification
+                notification.notify(
+                    title="Mining Dashboard — Ore DB Updated",
+                    message=f"+{len(new_ores)} new ore(s) detected and loaded.",
+                    timeout=6,
+                )
+            except Exception:
+                pass
+        self._history_cache = None
 
     # Applique la transparence à toutes les fenêtres ouvertes (root, flottantes, historique, config)
     def _apply_alpha(self, value: float) -> None:
@@ -2887,9 +2964,6 @@ class MiningDashboard:
             if tracker.session_active and "(notify)" in line_lower:
                 matched = [kw for kw in AUTO_PAUSE_KEYWORDS if kw.lower() in line_lower]
                 if matched:
-                    if not tracker.auto_stop_on_full:
-                        matched = [kw for kw in matched if "cargo hold is full" not in kw.lower()]
-                    if matched:
                         tracker.session_elapsed_offset += time.time() - tracker.session_start_time
                         tracker.session_active = False
                         if tracker.char_id in self.char_widgets:
@@ -3108,13 +3182,44 @@ class MiningDashboard:
                 winsound.PlaySound(CRIT_SOUND_FILE, winsound.SND_FILENAME | winsound.SND_ASYNC)
             except Exception: pass
 
+    def _ui_refresh_tick(self) -> None:
+        """Fires every 1 s to keep timers, rates, and fleet summary up to date."""
+        try:
+            self._update_ui_labels()
+        except Exception:
+            pass
+        self.root.after(1000, self._ui_refresh_tick)
+
+    @staticmethod
+    def _get_pause_timeout(tracker: 'CharacterTracker') -> float:
+        """Return auto-pause timeout in seconds, synced to the module cycle time.
+
+        Priority: configured cycle_time from modules > estimated from recent
+        mining events > default fallback.
+        """
+        modules = tracker.get_active_modules()
+        for m in modules:
+            if m.cycle_time > 0:
+                return m.cycle_time * 1.5
+
+        # Estimate from mining event intervals (need 3+ events)
+        if len(tracker._rate_window) >= 3:
+            timestamps = [t for t, _ in tracker._rate_window]
+            gaps = [timestamps[i+1] - timestamps[i] for i in range(len(timestamps) - 1)]
+            gaps = [g for g in gaps if g > 2.0]
+            if gaps:
+                avg_gap = sum(gaps) / len(gaps)
+                return avg_gap * 1.5
+
+        return AUTO_PAUSE_SECONDS_DEFAULT
+
     def _auto_pause_tick(self) -> None:
-        """Fires every 30 s; auto-pauses sessions with no mine event for AUTO_PAUSE_SECONDS."""
+        """Fires every 30 s; auto-pauses sessions idle longer than ~1.5x cycle time."""
         now_mono = time.monotonic()
         changed = False
         for char_id, tracker in self.characters.items():
             if (tracker.session_active and tracker.last_mine_mono > 0
-                    and now_mono - tracker.last_mine_mono > AUTO_PAUSE_SECONDS):
+                    and now_mono - tracker.last_mine_mono > self._get_pause_timeout(tracker)):
                 tracker.session_elapsed_offset += time.time() - tracker.session_start_time
                 tracker.session_active = False
                 tracker.last_mine_mono = 0.0
@@ -3333,7 +3438,6 @@ class MiningDashboard:
                         tracker.implant_profiles[profile_name] = profile_data.get("highwall_implant", False)
                         tracker.cargo_profiles[profile_name] = profile_data.get("cargo_capacity", 0.0)
 
-                    tracker.auto_stop_on_full = cfg.get("auto_stop_on_full", True)
                     tracker.active_profile = cfg.get("active_profile", "Default")
                     if tracker.active_profile not in tracker.ship_profiles:
                         if tracker.ship_profiles: tracker.active_profile = list(tracker.ship_profiles.keys())[0]
@@ -3379,7 +3483,6 @@ class MiningDashboard:
             ship_configs[char_id] = {
                 "active_profile": tracker.active_profile,
                 "profiles": profiles_data,
-                "auto_stop_on_full": tracker.auto_stop_on_full,
             }
         self.app_config["ship_configs"] = ship_configs
         self.save_config()
@@ -4198,6 +4301,16 @@ class MiningDashboard:
                  text=f"v{SDE_INFO['version']}  ·  {SDE_INFO['ore_count']} ores  ·  {SDE_INFO['updated_at']}",
                  fg=DIM, bg=BG_PANEL, font=("Consolas", 8)).pack(anchor="w", pady=(0, 4))
 
+        sde_auto_var = tk.BooleanVar(value=app_settings.get("sde_auto_update", SDE_AUTO_UPDATE))
+        sde_auto_row = tk.Frame(body, bg=BG_PANEL)
+        sde_auto_row.pack(fill="x", pady=(2, 4))
+        sde_auto_box = _make_toggle(sde_auto_row, sde_auto_var, BG_PANEL)
+        sde_auto_box.pack(side="left", padx=(0, 4))
+        sde_auto_lbl = tk.Label(sde_auto_row, text="Auto-update ore data on startup",
+                                fg=WHITE, bg=BG_PANEL, font=("Consolas", 9), cursor="hand2")
+        sde_auto_lbl.pack(side="left", padx=(4, 0))
+        sde_auto_lbl.bind("<Button-1>", lambda e: sde_auto_box.event_generate("<Button-1>"))
+
         # progress bar — hidden until update starts
         sde_bar_frame = tk.Frame(body, bg=BG_PANEL)
         sde_bar_border = tk.Frame(sde_bar_frame, bg=CYAN, padx=1, pady=1)
@@ -4353,7 +4466,7 @@ class MiningDashboard:
 
         # ── SAVE / CANCEL ────────────────────────────────────────────────
         def save_and_close():
-            global DOCS, UPDATE_INTERVAL_MS, HISTORY_DAYS, PLAY_CRIT_SOUND, WIN_ALPHA
+            global DOCS, UPDATE_INTERVAL_MS, HISTORY_DAYS, PLAY_CRIT_SOUND, WIN_ALPHA, SDE_AUTO_UPDATE
             try:
                 new_history = int(history_var.get())
                 if new_history < 1: new_history = 1
@@ -4370,6 +4483,7 @@ class MiningDashboard:
                 DOCS             = docs_var.get().strip()
                 HISTORY_DAYS     = new_history
                 PLAY_CRIT_SOUND  = crit_sound_var.get()
+                SDE_AUTO_UPDATE  = sde_auto_var.get()
                 WIN_ALPHA        = max(0.2, min(1.0, float(alpha_var.get())))
                 self._apply_alpha(WIN_ALPHA)
 
@@ -4377,6 +4491,7 @@ class MiningDashboard:
                     "docs_path": DOCS, "crit_sound_file": CRIT_SOUND_FILE,
                     "update_interval_ms": UPDATE_INTERVAL_MS, "history_days": HISTORY_DAYS,
                     "max_modules": MAX_MODULES, "play_crit_sound": PLAY_CRIT_SOUND,
+                    "sde_auto_update": SDE_AUTO_UPDATE,
                     "win_alpha": WIN_ALPHA,
                 }
                 self.app_config["theme"] = selected_theme
