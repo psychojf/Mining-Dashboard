@@ -222,7 +222,7 @@ def draw_neon_bar(canvas, pct, bar_color=None, glow=True, segments=True):
 
 # ---------------------------------------------------------------------------
 # ORE / ICE / GAS DATA  (SDE-aware, auto-updatable)
-# Source: EVE Online SDE build 3346029 (May 18, 2026)
+# Source: EVE Online SDE build 3351823 (May 25, 2026)
 # ---------------------------------------------------------------------------
 ORE_DATA_CACHE_FILE = "ore_data_cache.json"
 SDE_LATEST_URL = "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip"
@@ -234,7 +234,7 @@ SDE_SKIP_GROUPS = {
     "AIR Ore Asteroid Resources"
 }
 
-# Source: EVE Online SDE build 3346029 (May 18, 2026)
+# Source: EVE Online SDE build 3351823 (May 25, 2026)
 # To update before building the exe, run ore_data.py and copy its _SEED_VOLUMES /
 # _build_seed_ratios() output into these two dicts.
 _DEFAULT_ORE_VOLUMES: Dict[str, float] = {
@@ -729,7 +729,7 @@ else:
 MINING_LINE = re.compile(r'^\[.*?\]\s+\(mining\)', re.IGNORECASE)
 REGULAR_MINE_PATTERN = re.compile(r"You mined <font size=12><color=[^>]+>(?P<amount>\d+)<color=[^>]+><font size=10> units of <color=[^>]+><font size=12>(?P<ore_type>[^\r\n<]+)", re.IGNORECASE)
 CRIT_MINE_PATTERN = re.compile(r"You mined an additional <color=[^>]+><font size=12>(?P<amount>\d+)<color=[^>]+><font size=10> units of <color=[^>]+><font size=12>(?P<ore_type>[^\r\n<]+)", re.IGNORECASE | re.DOTALL)
-COMPRESSION_PATTERN = re.compile(r'Successfully compressed (?P<ore_type>[^\s]+) into (?P<amount>[\d,]+) Compressed', re.IGNORECASE)
+COMPRESSION_PATTERN = re.compile(r'Successfully compressed (?P<ore_type>.+?) into (?P<amount>[\d,]+) Compressed', re.IGNORECASE)
 RESIDUE_PATTERN = re.compile(r"Additional <font size=12><color=[^>]+>(?P<amount>\d+)<color=[^>]+><font size=10> units depleted from asteroid as residue", re.IGNORECASE)
 LISTENER_LINE = re.compile(r'Listener:\s*(.+)', re.IGNORECASE)
 LOG_TIMESTAMP = re.compile(r'^\[\s*(\d{4}\.\d{2}\.\d{2})\s+\d{2}:\d{2}:\d{2}\s*\]')
