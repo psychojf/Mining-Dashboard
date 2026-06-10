@@ -65,7 +65,133 @@ AUTO_PAUSE_KEYWORDS = [
 ]
 
 # ---------------------------------------------------------------------------
-# THEME ENGINE 
+# THREAT DETECTION  (ported from tm/detection.py — pure numpy, no Qt)
+# ---------------------------------------------------------------------------
+import numpy as _np
+
+def _tm_count_clusters_1d(boolean_1d, max_gap: int = 2, min_size: int = 3) -> int:
+    """Count clusters of consecutive True values in a 1-D bool array."""
+    true_indices = _np.where(boolean_1d)[0]
+    if len(true_indices) == 0:
+        return 0
+    gaps = _np.diff(true_indices) > (max_gap + 1)
+    split_indices = _np.where(gaps)[0] + 1
+    clusters = _np.split(true_indices, split_indices)
+    return sum(1 for c in clusters if len(c) >= min_size)
+
+
+def _tm_detect_threats(sct_img) -> tuple[int, int]:
+    """
+    Analyse a mss screenshot region. Returns (threat_count, ally_count).
+    Scans a 12-px column (x 4-16) per row for EVE standing icons.
+    Clusters of >=3 consecutive rows (gap <=2) count as one entity.
+    """
+    try:
+        img_arr = _np.array(sct_img, dtype=_np.int16)
+        roi = img_arr[:, 4:16, :3]
+        b, g, r = roi[:, :, 0], roi[:, :, 1], roi[:, :, 2]
+
+        dark_mask  = (r < 35)  & (g < 35)  & (b < 35)
+        white_mask = (r > 240) & (g > 240) & (b > 240)
+        valid_mask = ~(dark_mask | white_mask)
+
+        green_mask  = (g > 80) & (g > r * 1.8) & (g > b * 1.8)
+        blue_mask   = (b > 55) & (b > r * 2)   & (b > g * 1.5)
+        purple_mask = (r > 50) & (b > 80)       & (b > g * 1.8) & (r > g)
+        ally_pixels = valid_mask & (green_mask | blue_mask | purple_mask)
+
+        red_mask     = (r > 100) & (r > g * 1.5) & (r > b * 2)
+        max_rgb      = _np.maximum.reduce([r, g, b])
+        min_rgb      = _np.minimum.reduce([r, g, b])
+        neutral_mask = (
+            (r > 100) & (g > 100) & (b > 100) &
+            (r < 210) & (g < 210) & (b < 210) &
+            ((max_rgb - min_rgb) < 20) &
+            (g <= _np.maximum(r, b) + 10)
+        )
+        threat_pixels = valid_mask & (red_mask | neutral_mask)
+
+        ally_count   = _tm_count_clusters_1d(_np.any(ally_pixels,   axis=1))
+        threat_count = _tm_count_clusters_1d(_np.any(threat_pixels, axis=1))
+        return threat_count, ally_count
+    except Exception as exc:
+        print(f"[TM] detect_threats error: {exc}")
+        return 0, 0
+
+# ---------------------------------------------------------------------------
+# THREAT WATCHER
+# ---------------------------------------------------------------------------
+class ThreatWatcher:
+    """
+    Background threat detection using mss pixel scanning.
+
+    Reads detection_bbox from threat_config.json (path in config["tm_config_path"]).
+    Calls callback(neuts: int, friends: int) on every poll via the provided
+    schedule function (root.after). Starts paused — call set_paused(False) to begin.
+    """
+
+    POLL_MS = 1000
+
+    def __init__(self, config: dict, callback) -> None:
+        """
+        config  : dict with optional key "tm_config_path" pointing to threat_config.json
+        callback: callable(neuts: int, friends: int) — called on main thread via schedule_fn
+                  OR called directly if schedule_fn is None (for unit tests)
+        """
+        self.paused   = False
+        self.disabled = False
+        self.neuts    = 0
+        self.friends  = 0
+        self._callback    = callback
+        self._stop_event  = threading.Event()
+
+        tm_cfg_path = config.get("tm_config_path", "")
+        self._bbox = None
+        if tm_cfg_path and os.path.exists(tm_cfg_path):
+            try:
+                with open(tm_cfg_path, "r", encoding="utf-8") as f:
+                    tm_cfg = json.load(f)
+                self._bbox = tm_cfg.get("mirror_bbox")
+            except Exception as exc:
+                print(f"[TM] could not read threat_config.json: {exc}")
+
+        if not self._bbox:
+            self.disabled = True
+
+        self._thread = threading.Thread(
+            target=self._poll_loop, daemon=True, name="threat-watcher"
+        )
+        self._thread.start()
+
+    def set_paused(self, paused: bool) -> None:
+        self.paused = paused
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._thread.join(timeout=3.0)
+
+    def _poll_loop(self) -> None:
+        if self.disabled:
+            return
+        try:
+            import mss as _mss
+            with _mss.MSS() as sct:
+                while not self._stop_event.is_set():
+                    if True:  # always detect; alert gating is in _apply_threat_counts
+                        try:
+                            img = sct.grab(self._bbox)
+                            threats, allies = _tm_detect_threats(img)
+                            self.neuts   = threats
+                            self.friends = allies
+                            self._callback(threats, allies)
+                        except Exception as exc:
+                            print(f"[TM] poll error: {exc}")
+                    self._stop_event.wait(self.POLL_MS / 1000)
+        except Exception as exc:
+            print(f"[TM] watcher fatal: {exc}")
+
+# ---------------------------------------------------------------------------
+# THEME ENGINE
 # ---------------------------------------------------------------------------
 # Éclaircit une couleur hex par un montant fixe
 def _lighten(hx, amt):
@@ -222,7 +348,7 @@ def draw_neon_bar(canvas, pct, bar_color=None, glow=True, segments=True):
 
 # ---------------------------------------------------------------------------
 # ORE / ICE / GAS DATA  (SDE-aware, auto-updatable)
-# Source: EVE Online SDE build 3351823 (May 25, 2026)
+# Source: EVE Online SDE build 3386912 (Jun 10, 2026)
 # ---------------------------------------------------------------------------
 ORE_DATA_CACHE_FILE = "ore_data_cache.json"
 SDE_LATEST_URL = "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip"
@@ -234,7 +360,7 @@ SDE_SKIP_GROUPS = {
     "AIR Ore Asteroid Resources"
 }
 
-# Source: EVE Online SDE build 3351823 (May 25, 2026)
+# Source: EVE Online SDE build 3386912 (Jun 10, 2026)
 # To update before building the exe, run ore_data.py and copy its _SEED_VOLUMES /
 # _build_seed_ratios() output into these two dicts.
 _DEFAULT_ORE_VOLUMES: Dict[str, float] = {
@@ -259,7 +385,8 @@ _DEFAULT_ORE_VOLUMES: Dict[str, float] = {
     # 0.8 m³
     "Griemeer": 0.8, "Griemeer II-Grade": 0.8, "Griemeer III-Grade": 0.8, "Griemeer IV-Grade": 0.8,
     # 1.0 m³
-    "Fullerite-C50": 1.0, "Fullerite-C60": 1.0, "Fullerite-C70": 1.0,
+    "Fullerite-C50": 1.0, "Fullerite-C60": 1.0, "Fullerite-C70": 1.0, "Kangite X-Grade": 1.0,
+    "Moissanite X-Grade": 1.0, "Polycrase X-Grade": 1.0, "Raspite X-Grade": 1.0,
     # 1.2 m³
     "Kernite": 1.2, "Kernite II-Grade": 1.2, "Kernite III-Grade": 1.2, "Kernite IV-Grade": 1.2,
     "Kylixium": 1.2, "Kylixium II-Grade": 1.2, "Kylixium III-Grade": 1.2, "Kylixium IV-Grade": 1.2,
@@ -343,17 +470,18 @@ _DEFAULT_COMPRESSION_RATIOS: Dict[str, int] = {
     "Hedbergite III-Grade": 100, "Hedbergite IV-Grade": 100, "Hemorphite": 100, "Hemorphite II-Grade": 100,
     "Hemorphite III-Grade": 100, "Hemorphite IV-Grade": 100, "Hezorime": 100, "Hezorime II-Grade": 100,
     "Hezorime III-Grade": 100, "Hezorime IV-Grade": 100, "Jaspet": 100, "Jaspet II-Grade": 100,
-    "Jaspet III-Grade": 100, "Jaspet IV-Grade": 100, "Kernite": 100, "Kernite II-Grade": 100,
-    "Kernite III-Grade": 100, "Kernite IV-Grade": 100, "Kylixium": 100, "Kylixium II-Grade": 100,
-    "Kylixium III-Grade": 100, "Kylixium IV-Grade": 100, "Lavish Chromite": 100, "Lavish Otavite": 100,
-    "Lavish Sperrylite": 100, "Lavish Vanadinite": 100, "Loparite": 100, "Mercoxit": 100,
-    "Mercoxit II-Grade": 100, "Mercoxit III-Grade": 100, "Monazite": 100, "Mordunium": 100,
-    "Mordunium II-Grade": 100, "Mordunium III-Grade": 100, "Mordunium IV-Grade": 100, "Nocxite": 100,
-    "Nocxite II-Grade": 100, "Nocxite III-Grade": 100, "Nocxite IV-Grade": 100, "Omber": 100,
-    "Omber II-Grade": 100, "Omber III-Grade": 100, "Omber IV-Grade": 100, "Otavite": 100,
-    "Plagioclase": 100, "Plagioclase II-Grade": 100, "Plagioclase III-Grade": 100, "Plagioclase IV-Grade": 100,
-    "Pollucite": 100, "Pyroxeres": 100, "Pyroxeres II-Grade": 100, "Pyroxeres III-Grade": 100,
-    "Pyroxeres IV-Grade": 100, "Rakovene": 100, "Rakovene II-Grade": 100, "Rakovene III-Grade": 100,
+    "Jaspet III-Grade": 100, "Jaspet IV-Grade": 100, "Kangite X-Grade": 100, "Kernite": 100,
+    "Kernite II-Grade": 100, "Kernite III-Grade": 100, "Kernite IV-Grade": 100, "Kylixium": 100,
+    "Kylixium II-Grade": 100, "Kylixium III-Grade": 100, "Kylixium IV-Grade": 100, "Lavish Chromite": 100,
+    "Lavish Otavite": 100, "Lavish Sperrylite": 100, "Lavish Vanadinite": 100, "Loparite": 100,
+    "Mercoxit": 100, "Mercoxit II-Grade": 100, "Mercoxit III-Grade": 100, "Moissanite X-Grade": 100,
+    "Monazite": 100, "Mordunium": 100, "Mordunium II-Grade": 100, "Mordunium III-Grade": 100,
+    "Mordunium IV-Grade": 100, "Nocxite": 100, "Nocxite II-Grade": 100, "Nocxite III-Grade": 100,
+    "Nocxite IV-Grade": 100, "Omber": 100, "Omber II-Grade": 100, "Omber III-Grade": 100,
+    "Omber IV-Grade": 100, "Otavite": 100, "Plagioclase": 100, "Plagioclase II-Grade": 100,
+    "Plagioclase III-Grade": 100, "Plagioclase IV-Grade": 100, "Pollucite": 100, "Polycrase X-Grade": 100,
+    "Pyroxeres": 100, "Pyroxeres II-Grade": 100, "Pyroxeres III-Grade": 100, "Pyroxeres IV-Grade": 100,
+    "Rakovene": 100, "Rakovene II-Grade": 100, "Rakovene III-Grade": 100, "Raspite X-Grade": 100,
     "Replete Carnotite": 100, "Replete Cinnabar": 100, "Replete Pollucite": 100, "Replete Zircon": 100,
     "Scheelite": 100, "Scordite": 100, "Scordite 0-Grade": 100, "Scordite II-Grade": 100,
     "Scordite III-Grade": 100, "Scordite IV-Grade": 100, "Shimmering Chromite": 100, "Shimmering Otavite": 100,
@@ -738,7 +866,7 @@ LOG_TIMESTAMP = re.compile(r'^\[\s*(\d{4}\.\d{2}\.\d{2})\s+\d{2}:\d{2}:\d{2}\s*\
 SDE_PROGRESS_PCT = re.compile(r'\((?P<pct>\d+)%\)')
 SDE_AUTO_UPDATE = True
 AUTO_PAUSE_SECONDS_DEFAULT = 120   # fallback auto-pause if cycle time unknown
-RATE_WINDOW_SEC    = 120   # rolling window width for m³/s rate display
+RATE_WINDOW_SEC    = 60    # rolling window width for m³/s rate display
 
 _ORE_CATEGORIES = {
     "Veldspar": "2ecc40", "Scordite": "2ecc40", "Pyroxeres": "2ecc40", "Plagioclase": "2ecc40", "Omber": "2ecc40", "Kernite": "2ecc40",
@@ -1087,8 +1215,20 @@ class MiningDashboard:
         self.ship_config_dialogs: Dict[str, tk.Toplevel] = {}
         self.config_dialog: Optional[tk.Toplevel] = None
         self.update_loop_running = True
+        self.threat_watcher = None
+        self._alert_enabled = False
 
         self.setup_ui()
+
+        self.threat_watcher = ThreatWatcher(
+            config=self.app_config,
+            callback=self._on_threat_update,
+        )
+        if self.threat_watcher.disabled:
+            if hasattr(self, 'neuts_lbl'):
+                self.neuts_lbl.config(text="TM: ?")
+            if hasattr(self, 'friends_lbl'):
+                self.friends_lbl.config(text="")
 
         if self.app_config.get("win_rolled_up", False):
             saved_geom = self.app_config.get("win_geom", "")
@@ -1854,6 +1994,22 @@ class MiningDashboard:
         title_lbl = tk.Label(top_bar, text="★ MINING ★", fg=CYAN, bg=BG, font=("Consolas", 11, "bold"))
         title_lbl.pack(side="left")
         title_lbl.bind("<Double-Button-1>", self.toggle_rollup)
+
+        self.neuts_lbl = tk.Label(
+            top_bar, text="Neuts: –", fg="#e05050", bg=BG,
+            font=("Consolas", 9, "bold"), cursor="fleur",
+        )
+        self.neuts_lbl.pack(side="left", padx=(12, 0))
+        self.neuts_lbl.bind("<Button-1>", self._start_drag)
+        self.neuts_lbl.bind("<B1-Motion>", self._do_drag)
+
+        self.friends_lbl = tk.Label(
+            top_bar, text="Friends: –", fg="#50e080", bg=BG,
+            font=("Consolas", 9, "bold"), cursor="fleur",
+        )
+        self.friends_lbl.pack(side="left", padx=(6, 0))
+        self.friends_lbl.bind("<Button-1>", self._start_drag)
+        self.friends_lbl.bind("<B1-Motion>", self._do_drag)
 
         close_btn = tk.Label(top_bar, text="✕", fg=DIM, bg=BG, font=("Consolas", 14, "bold"), cursor="hand2")
         close_btn.pack(side="right", padx=(5, 0))
@@ -2867,9 +3023,35 @@ class MiningDashboard:
             return f"{w}x{self._full_height}+{x}+{y}"
         return self.root.winfo_geometry()
 
+    def _on_threat_update(self, neuts: int, friends: int) -> None:
+        """Called from ThreatWatcher thread — schedules UI update on main thread."""
+        self.root.after(0, self._apply_threat_counts, neuts, friends)
+
+    def _apply_threat_counts(self, neuts: int, friends: int) -> None:
+        """Runs on main thread. Always updates labels; sound only when session active."""
+        if hasattr(self, 'neuts_lbl'):
+            self.neuts_lbl.config(text=f"Neuts: {neuts}")
+        if hasattr(self, 'friends_lbl'):
+            self.friends_lbl.config(text=f"Friends: {friends}")
+        if neuts > 0 and getattr(self, '_alert_enabled', False):
+            _sound = self.get_resource_path("alert_hostile.wav")
+            if os.path.exists(_sound):
+                try:
+                    winsound.PlaySound(_sound, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                except Exception:
+                    pass
+
+
+    def _sync_threat_watcher_pause(self) -> None:
+        """Enable alerts when any session is active; disable when all stopped."""
+        any_active = any(t.session_active for t in self.all_characters.values())
+        self._alert_enabled = any_active
+
     # Fermeture propre : sauvegarde la géométrie/config, arrête le tray et quitte
     def on_close(self) -> None:
         self.update_loop_running = False
+        if self.threat_watcher is not None:
+            self.threat_watcher.stop()
         obs = getattr(self, '_gamelog_observer', None)
         if obs is not None:
             try:
@@ -2950,6 +3132,7 @@ class MiningDashboard:
             if rate > 0:
                 w['actual'].config(text=f"◉ Actual: {rate:.2f} m3/s ({rate * 3600:,.0f} m3/hr)")
         self._refresh_start_all_btn()
+        self._sync_threat_watcher_pause()
 
     # Parse les lignes de log EVE pour extraire minage normal, critique, compression et résidu
     def _process_log_data(self, tracker: CharacterTracker, data: str) -> None:
@@ -3177,10 +3360,14 @@ class MiningDashboard:
             try: notification.notify(title="MINING", message="Critical Hit!", timeout=1)
             except Exception: pass
         # Use native winsound instead of playsound dependency
-        if PLAY_CRIT_SOUND and os.path.exists(CRIT_SOUND_FILE):
-            try:
-                winsound.PlaySound(CRIT_SOUND_FILE, winsound.SND_FILENAME | winsound.SND_ASYNC)
-            except Exception: pass
+        # CRIT_SOUND_FILE may be a user-set path; fall back to the PyInstaller
+        # bundle (_MEIPASS) when it isn't found next to the exe/script
+        if PLAY_CRIT_SOUND:
+            sound_path = CRIT_SOUND_FILE if os.path.exists(CRIT_SOUND_FILE) else self.get_resource_path(CRIT_SOUND_FILE)
+            if os.path.exists(sound_path):
+                try:
+                    winsound.PlaySound(sound_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                except Exception: pass
 
     def _ui_refresh_tick(self) -> None:
         """Fires every 1 s to keep timers, rates, and fleet summary up to date."""
@@ -3374,6 +3561,7 @@ class MiningDashboard:
         else:
             tracker.session_elapsed_offset += time.time() - tracker.session_start_time
             widgets['start_stop_btn'].config(text="▶ START", fg=GREEN)
+        self._sync_threat_watcher_pause()
 
     # Remet le cargo à zéro pour simuler un déchargement en station
     def empty_cargo(self, char_id: str):
@@ -3415,6 +3603,7 @@ class MiningDashboard:
         widgets['send_btn'].config(state="disabled", fg=DIM)
         if not self._is_valid_webhook_url(): widgets['send_tip'].update_text("No mining data and no webhook URL configured")
         else: widgets['send_tip'].update_text("No mining data yet \u2014 start mining to enable")
+        self._sync_threat_watcher_pause()
 
     # Charge les profils de vaisseau (modules, drones, implants, cargo) depuis la config JSON
     def load_ship_configs(self):
