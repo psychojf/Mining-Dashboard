@@ -36,11 +36,17 @@ A real-time mining activity tracker for EVE Online. Reads your game logs to disp
 ### Python packages
 
 ```
-playsound==1.2.2
 plyer>=2.1.0
 openpyxl>=3.1.0
+watchdog>=6.0.0
 Pillow>=12.0.0
 pystray>=0.19.0
+
+# build
+pyinstaller>=6.0.0
+
+# dev / testing
+pytest>=7.0.0
 ```
 
 Install into the project virtual environment:
@@ -63,10 +69,12 @@ python -m venv .venv
 ## Building a Standalone Executable
 
 ```bash
-.venv\Scripts\pyinstaller --onefile --windowed --icon=mining_icon.ico --add-data "alert_crit.wav;." mining_dashboard.py
+.venv\Scripts\pyinstaller BUILD.spec
 ```
 
 The compiled `.exe` will be in the `dist\` folder.
+
+`BUILD.spec` is the single source of truth for the build: it bundles `mining_icon.ico` and `alert_crit.wav`, and declares the hidden imports PyInstaller needs.
 
 ---
 

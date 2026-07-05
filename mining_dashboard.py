@@ -53,7 +53,6 @@ DOCS = os.path.expanduser(r"~\Documents\EVE\logs\Gamelogs\*")
 CRIT_SOUND_FILE = "alert_crit.wav"
 PLAY_CRIT_SOUND = True  # Default to playing the sound
 CONFIG_FILE = "mining_config.json"
-UPDATE_INTERVAL_MS = 500
 HISTORY_DAYS = 60
 CRITICAL_HIT_KEYWORD = "Critical mining success"
 MAX_MODULES = 5  # Maximum mining modules per ship
@@ -63,132 +62,11 @@ AUTO_PAUSE_KEYWORDS = [
     "Targeting attempt failed as the designated object is no longer present",
     "cargo hold is full","The asteroid is depleted",
 ]
+# the one auto-pause trigger the per-character Auto-Stop toggle can disable
+CARGO_FULL_KEYWORD = "cargo hold is full"
 
-# ---------------------------------------------------------------------------
-# THREAT DETECTION  (ported from tm/detection.py — pure numpy, no Qt)
-# ---------------------------------------------------------------------------
-import numpy as _np
-
-def _tm_count_clusters_1d(boolean_1d, max_gap: int = 2, min_size: int = 3) -> int:
-    """Count clusters of consecutive True values in a 1-D bool array."""
-    true_indices = _np.where(boolean_1d)[0]
-    if len(true_indices) == 0:
-        return 0
-    gaps = _np.diff(true_indices) > (max_gap + 1)
-    split_indices = _np.where(gaps)[0] + 1
-    clusters = _np.split(true_indices, split_indices)
-    return sum(1 for c in clusters if len(c) >= min_size)
-
-
-def _tm_detect_threats(sct_img) -> tuple[int, int]:
-    """
-    Analyse a mss screenshot region. Returns (threat_count, ally_count).
-    Scans a 12-px column (x 4-16) per row for EVE standing icons.
-    Clusters of >=3 consecutive rows (gap <=2) count as one entity.
-    """
-    try:
-        img_arr = _np.array(sct_img, dtype=_np.int16)
-        roi = img_arr[:, 4:16, :3]
-        b, g, r = roi[:, :, 0], roi[:, :, 1], roi[:, :, 2]
-
-        dark_mask  = (r < 35)  & (g < 35)  & (b < 35)
-        white_mask = (r > 240) & (g > 240) & (b > 240)
-        valid_mask = ~(dark_mask | white_mask)
-
-        green_mask  = (g > 80) & (g > r * 1.8) & (g > b * 1.8)
-        blue_mask   = (b > 55) & (b > r * 2)   & (b > g * 1.5)
-        purple_mask = (r > 50) & (b > 80)       & (b > g * 1.8) & (r > g)
-        ally_pixels = valid_mask & (green_mask | blue_mask | purple_mask)
-
-        red_mask     = (r > 100) & (r > g * 1.5) & (r > b * 2)
-        max_rgb      = _np.maximum.reduce([r, g, b])
-        min_rgb      = _np.minimum.reduce([r, g, b])
-        neutral_mask = (
-            (r > 100) & (g > 100) & (b > 100) &
-            (r < 210) & (g < 210) & (b < 210) &
-            ((max_rgb - min_rgb) < 20) &
-            (g <= _np.maximum(r, b) + 10)
-        )
-        threat_pixels = valid_mask & (red_mask | neutral_mask)
-
-        ally_count   = _tm_count_clusters_1d(_np.any(ally_pixels,   axis=1))
-        threat_count = _tm_count_clusters_1d(_np.any(threat_pixels, axis=1))
-        return threat_count, ally_count
-    except Exception as exc:
-        print(f"[TM] detect_threats error: {exc}")
-        return 0, 0
-
-# ---------------------------------------------------------------------------
-# THREAT WATCHER
-# ---------------------------------------------------------------------------
-class ThreatWatcher:
-    """
-    Background threat detection using mss pixel scanning.
-
-    Reads detection_bbox from threat_config.json (path in config["tm_config_path"]).
-    Calls callback(neuts: int, friends: int) on every poll via the provided
-    schedule function (root.after). Starts paused — call set_paused(False) to begin.
-    """
-
-    POLL_MS = 1000
-
-    def __init__(self, config: dict, callback) -> None:
-        """
-        config  : dict with optional key "tm_config_path" pointing to threat_config.json
-        callback: callable(neuts: int, friends: int) — called on main thread via schedule_fn
-                  OR called directly if schedule_fn is None (for unit tests)
-        """
-        self.paused   = False
-        self.disabled = False
-        self.neuts    = 0
-        self.friends  = 0
-        self._callback    = callback
-        self._stop_event  = threading.Event()
-
-        tm_cfg_path = config.get("tm_config_path", "")
-        self._bbox = None
-        if tm_cfg_path and os.path.exists(tm_cfg_path):
-            try:
-                with open(tm_cfg_path, "r", encoding="utf-8") as f:
-                    tm_cfg = json.load(f)
-                self._bbox = tm_cfg.get("mirror_bbox")
-            except Exception as exc:
-                print(f"[TM] could not read threat_config.json: {exc}")
-
-        if not self._bbox:
-            self.disabled = True
-
-        self._thread = threading.Thread(
-            target=self._poll_loop, daemon=True, name="threat-watcher"
-        )
-        self._thread.start()
-
-    def set_paused(self, paused: bool) -> None:
-        self.paused = paused
-
-    def stop(self) -> None:
-        self._stop_event.set()
-        self._thread.join(timeout=3.0)
-
-    def _poll_loop(self) -> None:
-        if self.disabled:
-            return
-        try:
-            import mss as _mss
-            with _mss.MSS() as sct:
-                while not self._stop_event.is_set():
-                    if True:  # always detect; alert gating is in _apply_threat_counts
-                        try:
-                            img = sct.grab(self._bbox)
-                            threats, allies = _tm_detect_threats(img)
-                            self.neuts   = threats
-                            self.friends = allies
-                            self._callback(threats, allies)
-                        except Exception as exc:
-                            print(f"[TM] poll error: {exc}")
-                    self._stop_event.wait(self.POLL_MS / 1000)
-        except Exception as exc:
-            print(f"[TM] watcher fatal: {exc}")
+# Highwall Mining MX-1005 implant: +5% module yield
+IMPLANT_YIELD_MULT = 1.05
 
 # ---------------------------------------------------------------------------
 # THEME ENGINE
@@ -317,10 +195,15 @@ CHAR_ACCENTS = ["#3dd8e0", "#ff9f43", "#a29bfe", "#e056fd", "#26de81", "#fc5c65"
 def draw_neon_bar(canvas, pct, bar_color=None, glow=True, segments=True):
     bar_color = bar_color or CYAN
     canvas.delete("all")
-    canvas.update_idletasks()
     w = canvas.winfo_width()
     h = canvas.winfo_height()
-    if w <= 1: return
+    if w <= 1:
+        # not laid out yet — force one geometry pass, but only in that case
+        # (update_idletasks on every redraw is a synchronous layout per tick)
+        canvas.update_idletasks()
+        w = canvas.winfo_width()
+        h = canvas.winfo_height()
+        if w <= 1: return
     pad = 2
 
     canvas.create_rectangle(0, 0, w, h, fill="#0a1520", outline="#1a2a3a", width=1)
@@ -361,8 +244,8 @@ SDE_SKIP_GROUPS = {
 }
 
 # Source: EVE Online SDE build 3386912 (Jun 10, 2026)
-# To update before building the exe, run ore_data.py and copy its _SEED_VOLUMES /
-# _build_seed_ratios() output into these two dicts.
+# To refresh before building the exe, run `python ore_data.py`: it downloads the
+# latest SDE and rewrites these two dicts (and the build stamp above) in place.
 _DEFAULT_ORE_VOLUMES: Dict[str, float] = {
     # 0.1 m³
     "Banidine": 0.1, "Mordunium": 0.1, "Mordunium II-Grade": 0.1, "Mordunium III-Grade": 0.1,
@@ -829,15 +712,48 @@ ESI_PRICE_CACHE_TTL_HOURS = 24
 _ORE_TYPE_ID_FALLBACK: Dict[str, int] = {
     "Veldspar": 1230, "Scordite": 1228, "Pyroxeres": 1224,
     "Plagioclase": 18, "Omber": 1227, "Kernite": 20,
-    "Jaspet": 1226, "Hemorphite": 1229, "Hedbergite": 21,
+    "Jaspet": 1226, "Hemorphite": 1231, "Hedbergite": 21,
     "Arkonor": 22, "Bistot": 1223, "Crokite": 1225,
-    "Dark Ochre": 1232, "Mercoxit": 11396, "Spodumain": 19,
+    "Gneiss": 1229, "Dark Ochre": 1232, "Mercoxit": 11396,
+    "Spodumain": 19,
 }
 ORE_TYPE_IDS: Dict[str, int] = dict(_ORE_TYPE_ID_FALLBACK)  # extended from SDE cache below
 
 _esi_prices: Dict[int, float] = {}          # type_id → adjusted_price ISK/unit
 _esi_cache_lock = threading.Lock()
 _esi_ids_resolved: bool = False             # True once the /universe/ids resolution attempt finishes
+
+# Grade suffixes stripped when resolving an ore name to its base type ID —
+# handles both "II-Grade" and shorthand "II" from some log formats
+_GRADE_SUFFIXES = (
+    " IV-Grade", " III-Grade", " II-Grade", " 0-Grade",
+    " IV", " III", " II", " I",
+)
+# name → (type_id or None, len(ORE_TYPE_IDS) at lookup). ORE_TYPE_IDS only ever
+# grows, so hits are cached forever and misses retried only after it grows —
+# avoids re-running the fuzzy scan for the same names every UI tick
+_ore_id_memo: Dict[str, Tuple[Optional[int], int]] = {}
+
+def _lookup_ore_type_id(ore_name: str) -> Optional[int]:
+    ids_len = len(ORE_TYPE_IDS)
+    cached = _ore_id_memo.get(ore_name)
+    if cached is not None and (cached[0] is not None or cached[1] == ids_len):
+        return cached[0]
+    type_id = ORE_TYPE_IDS.get(ore_name)
+    if type_id is None:
+        for suffix in _GRADE_SUFFIXES:
+            if ore_name.endswith(suffix):
+                type_id = ORE_TYPE_IDS.get(ore_name[: -len(suffix)])
+                break
+    if type_id is None:
+        # Fuzzy: find any known ore name that appears inside this ore_name
+        ore_lower = ore_name.lower()
+        for known_name, tid in ORE_TYPE_IDS.items():
+            if known_name.lower() in ore_lower:
+                type_id = tid
+                break
+    _ore_id_memo[ore_name] = (type_id, ids_len)
+    return type_id
 
 _cached = _load_ore_data_from_cache()
 if _cached and "ore_volumes" in _cached:
@@ -1020,17 +936,22 @@ class CharacterTracker:
         self.implant_profiles: Dict[str, bool] = {"Default": False}
         self.cargo_profiles: Dict[str, float] = {"Default": 0.0}
         self.active_profile: str = "Default"
-        self.session_start_time: float = time.time()
+        # monotonic clock: session timing must survive wall-clock jumps (NTP sync, DST)
+        self.session_start_time: float = time.monotonic()
         self.session_start_m3: float = 0.0
         self.session_elapsed_offset: float = 0.0
         self.session_active: bool = False
         self.last_mine_mono: float = 0.0
         self._rate_window: deque = deque()
+        # last mined ore/volume — persists across read chunks so residue lines
+        # arriving in a later chunk still attribute to the right ore
+        self.last_mined_volume: float = 0.0
+        self.last_mined_ore: str = "Unknown"
 
 
     # Retourne la durée active cumulée de la session en secondes
     def get_session_active_duration(self) -> float:
-        if self.session_active: return self.session_elapsed_offset + (time.time() - self.session_start_time)
+        if self.session_active: return self.session_elapsed_offset + (time.monotonic() - self.session_start_time)
         return self.session_elapsed_offset
 
     # Retourne les modules du profil actif
@@ -1053,15 +974,16 @@ class CharacterTracker:
     # Calcule le débit théorique total en m³/s (modules + drones + bonus implant)
     def get_total_theoretical_m3_per_sec(self) -> float:
         total_yield_sec = 0.0
+        yield_multiplier = IMPLANT_YIELD_MULT if self.get_active_implant() else 1.0
         for module in self.get_active_modules():
             if module.enabled and module.is_configured():
-                drain_sec = module.get_m3_per_sec()
-                yield_multiplier = 1.054 if self.get_active_implant() else 1.0
-                total_yield_sec += drain_sec * yield_multiplier
+                total_yield_sec += module.get_m3_per_sec() * yield_multiplier
 
         drone = self.get_active_drones()
         if drone.is_configured(): total_yield_sec += drone.get_total_m3_per_sec()
-        return round(total_yield_sec, 1)
+        # full precision — callers round at display time; rounding here skews
+        # "Full in" estimates and fleet sums (per-char error × fleet size)
+        return total_yield_sec
 
     # Compte le nombre de modules actifs et correctement configurés
     def get_active_module_count(self) -> int: return sum(1 for m in self.get_active_modules() if m.enabled and m.is_configured())
@@ -1209,26 +1131,18 @@ class MiningDashboard:
         self.floating_windows: Dict[str, tk.Toplevel] = {}
         # Restore hidden state from config so show/hide survives restarts
         self.hidden_windows: set = set(self.app_config.get("hidden_windows", []))
+        # Per-character Auto-Stop toggle: chars in this set keep mining through
+        # cargo-full notifications (other auto-pause triggers stay active)
+        self._auto_stop_disabled: set = set(self.app_config.get("auto_stop_disabled", []))
+        self._warned_unknown: set = set()   # ore names already warned about (anti-spam)
         self.chars_container = None
         
         self.history_window = None
         self.ship_config_dialogs: Dict[str, tk.Toplevel] = {}
         self.config_dialog: Optional[tk.Toplevel] = None
         self.update_loop_running = True
-        self.threat_watcher = None
-        self._alert_enabled = False
 
         self.setup_ui()
-
-        self.threat_watcher = ThreatWatcher(
-            config=self.app_config,
-            callback=self._on_threat_update,
-        )
-        if self.threat_watcher.disabled:
-            if hasattr(self, 'neuts_lbl'):
-                self.neuts_lbl.config(text="TM: ?")
-            if hasattr(self, 'friends_lbl'):
-                self.friends_lbl.config(text="")
 
         if self.app_config.get("win_rolled_up", False):
             saved_geom = self.app_config.get("win_geom", "")
@@ -1285,17 +1199,12 @@ class MiningDashboard:
         self.update_loop()
 
         # Start watching the gamelog directory for file changes; this replaces
-        # the old UPDATE_INTERVAL_MS timer — updates now fire only on real I/O
-        _gamelog_dir = os.path.dirname(os.path.expanduser(DOCS))
+        # the old fixed-interval polling timer — updates now fire only on real I/O
         self._gamelog_observer = None
-        if os.path.isdir(_gamelog_dir):
-            try:
-                _handler = _GamelogHandler(self)
-                self._gamelog_observer = Observer()
-                self._gamelog_observer.schedule(_handler, _gamelog_dir, recursive=False)
-                self._gamelog_observer.start()
-            except Exception as _e:
-                print(f"[error] MiningDashboard.__init__: watchdog failed to start on {_gamelog_dir}: {_e}")
+        self._start_gamelog_observer()
+        # Safety net: if the observer could not start (missing/renamed folder),
+        # fall back to slow polling so log tracking still works
+        self.root.after(5000, self._fallback_poll_tick)
 
         self.root.after(30_000, self._auto_pause_tick)
         self._ui_refresh_tick()
@@ -1328,11 +1237,10 @@ class MiningDashboard:
             top.destroy()
         self.floating_windows.clear()
         self.char_widgets.clear()
-        # Persist hidden state before clearing so it survives the rebuild
+        # Persist hidden state; sync_floating_windows re-withdraws hidden windows
+        # as it recreates them, and setup_ui renders the hub from the same set
         self._save_hidden_windows()
-        hidden_before_rebuild = set(self.hidden_windows)
-        self.hidden_windows.clear()
-        
+
         # Destroy Main UI inner frame — skip config dialog if it's open
         for widget in self.root.winfo_children():
             if self.config_dialog and widget == self.config_dialog:
@@ -1342,15 +1250,6 @@ class MiningDashboard:
         self.root.configure(bg=BORDER)
         self.setup_ui()
         self.sync_floating_windows()
-
-        # Re-apply hidden state — withdraw any windows that were hidden before the theme change
-        for cid in hidden_before_rebuild:
-            if cid in self.floating_windows:
-                top = self.floating_windows[cid]
-                if top.winfo_exists():
-                    top.withdraw()
-                self.hidden_windows.add(cid)
-        self.rebuild_dashboard()
 
     # Force l'apparition de la fenêtre dans la barre des tâches Windows (WS_EX_APPWINDOW)
     def set_app_window(self):
@@ -1367,8 +1266,12 @@ class MiningDashboard:
         self.root.deiconify()
         self.root.wm_attributes("-topmost", True)
 
-    # Scanne tous les fichiers logs EVE pour détecter les personnages actifs
+    # Scanne tous les fichiers logs EVE pour détecter les personnages actifs.
+    # Les noms sont mis en cache dans la config : seuls les fichiers de
+    # personnages encore inconnus sont ouverts (gros gain au démarrage)
     def discover_all_characters(self) -> Dict[str, CharacterTracker]:
+        name_cache: Dict[str, str] = dict(self.app_config.get("char_name_cache", {}))
+        cache_dirty = False
         char_names: Dict[str, str] = {}
         char_counts: Dict[str, int] = {}
         for filepath in self._get_all_log_files():
@@ -1376,8 +1279,16 @@ class MiningDashboard:
             if char_id:
                 char_counts[char_id] = char_counts.get(char_id, 0) + 1
                 if char_id not in char_names:
-                    name = self._read_listener_name(filepath)
-                    if name: char_names[char_id] = name
+                    if char_id in name_cache:
+                        char_names[char_id] = name_cache[char_id]
+                    else:
+                        name = self._read_listener_name(filepath)
+                        if name:
+                            char_names[char_id] = name
+                            name_cache[char_id] = name
+                            cache_dirty = True
+        if cache_dirty:
+            self.app_config["char_name_cache"] = name_cache
 
         sorted_ids = sorted(char_names.keys(), key=lambda cid: char_counts.get(cid, 0), reverse=True)
         result: Dict[str, CharacterTracker] = {}
@@ -1995,22 +1906,6 @@ class MiningDashboard:
         title_lbl.pack(side="left")
         title_lbl.bind("<Double-Button-1>", self.toggle_rollup)
 
-        self.neuts_lbl = tk.Label(
-            top_bar, text="Neuts: –", fg="#e05050", bg=BG,
-            font=("Consolas", 9, "bold"), cursor="fleur",
-        )
-        self.neuts_lbl.pack(side="left", padx=(12, 0))
-        self.neuts_lbl.bind("<Button-1>", self._start_drag)
-        self.neuts_lbl.bind("<B1-Motion>", self._do_drag)
-
-        self.friends_lbl = tk.Label(
-            top_bar, text="Friends: –", fg="#50e080", bg=BG,
-            font=("Consolas", 9, "bold"), cursor="fleur",
-        )
-        self.friends_lbl.pack(side="left", padx=(6, 0))
-        self.friends_lbl.bind("<Button-1>", self._start_drag)
-        self.friends_lbl.bind("<B1-Motion>", self._do_drag)
-
         close_btn = tk.Label(top_bar, text="✕", fg=DIM, bg=BG, font=("Consolas", 14, "bold"), cursor="hand2")
         close_btn.pack(side="right", padx=(5, 0))
         close_btn.bind("<Button-1>", lambda e: self.on_close())
@@ -2139,6 +2034,19 @@ class MiningDashboard:
         cycles_label = tk.Label(cargo_frame, text="Full in: --", fg=DIM, bg=BG_PANEL, font=("Consolas", 8))
         cycles_label.pack(anchor="w", pady=(2, 0))
 
+        # Auto-Stop toggle — ON (cyan): session pauses when cargo is full (default);
+        # OFF (dim): cargo-full events are ignored, other auto-pause triggers stay active
+        auto_stop_on = char_id not in self._auto_stop_disabled
+        auto_stop_btn = tk.Label(
+            cargo_frame,
+            text="⏸ Auto-Stop: ON" if auto_stop_on else "⏸ Auto-Stop: OFF",
+            fg=CYAN if auto_stop_on else DIM,
+            bg=BG_PANEL, font=("Consolas", 8, "bold"), cursor="hand2",
+        )
+        auto_stop_btn.pack(anchor="w", pady=(2, 0))
+        auto_stop_btn.bind("<Button-1>", lambda e, cid=char_id: self.toggle_auto_stop(cid))
+        ToolTip(auto_stop_btn, "ON: pause session when cargo hold is full\nOFF: keep the session running on cargo-full")
+
         control_frame = tk.Frame(col_inner, bg=BG_PANEL)
         control_frame.pack(fill="x", pady=(5, 0))
         control_frame.bind("<Button-3>", show_context_menu)
@@ -2222,9 +2130,25 @@ class MiningDashboard:
             'copy_btn': copy_btn, 'send_btn': send_btn,
             'copy_tip': copy_tip, 'send_tip': send_tip,
             'cargo_text': cargo_text_label, 'cargo_canvas': cargo_canvas,
-            'cycles_label': cycles_label,
+            'cycles_label': cycles_label, 'auto_stop_btn': auto_stop_btn,
         }
         return col_outer, widgets
+
+    # Bascule le toggle Auto-Stop d'un personnage et persiste l'état dans la config
+    def toggle_auto_stop(self, char_id: str) -> None:
+        if char_id in self._auto_stop_disabled:
+            self._auto_stop_disabled.discard(char_id)
+        else:
+            self._auto_stop_disabled.add(char_id)
+        self.app_config["auto_stop_disabled"] = list(self._auto_stop_disabled)
+        self.save_config()
+        w = self.char_widgets.get(char_id)
+        if w and 'auto_stop_btn' in w:
+            on = char_id not in self._auto_stop_disabled
+            w['auto_stop_btn'].config(
+                text="⏸ Auto-Stop: ON" if on else "⏸ Auto-Stop: OFF",
+                fg=CYAN if on else DIM,
+            )
 
     # Ouvre la fenêtre d'historique de minage avec sélection de la période
     def show_history(self) -> None:
@@ -2389,40 +2313,29 @@ class MiningDashboard:
         text_widget.insert("1.0", result)
         text_widget.config(state="disabled")
 
-    # Rassemble et retourne les données de minage agrégées sur N jours pour l'export
-    def _gather_history_data(self, days: int):
-        try:
-            days = int(days)
-            if days < 1: days = 1
-            max_days = self.get_max_history_days()
-            if days > max_days: days = max_days
-        except ValueError: days = HISTORY_DAYS
-
-        threshold = datetime.now() - timedelta(days=days)
+    # Agrège les données journalières en totaux par personnage et par minerai
+    @staticmethod
+    def _aggregate_history(per_char_daily: Dict[str, Dict[str, Dict[str, float]]]):
         per_char_ores: Dict[str, Dict[str, float]] = {}
         per_char_m3: Dict[str, float] = {}
         combined_m3 = 0.0
+        for char_id, daily in per_char_daily.items():
+            ores: Dict[str, float] = {}
+            for date_ores in daily.values():
+                for ore_name, volume in date_ores.items():
+                    ores[ore_name] = ores.get(ore_name, 0.0) + volume
+            per_char_ores[char_id] = ores
+            char_total = sum(ores.values())
+            per_char_m3[char_id] = char_total
+            combined_m3 += char_total
+        return per_char_ores, per_char_m3, combined_m3
 
-        all_files = self._get_all_log_files()
-        for log_file in all_files:
-            if os.path.getmtime(log_file) > threshold.timestamp():
-                char_id = self._get_char_id_from_file(log_file)
-                if not char_id or char_id not in self.all_characters: continue
-                if char_id not in per_char_ores:
-                    per_char_ores[char_id] = {}
-                    per_char_m3[char_id] = 0.0
-                try:
-                    with open(log_file, "r", encoding="utf-8-sig", errors="ignore") as f:
-                        for line in f:
-                            match = REGULAR_MINE_PATTERN.search(line) or CRIT_MINE_PATTERN.search(line)
-                            if match:
-                                units = float(match.group('amount').replace(",", ""))
-                                volume, ore_name = self.get_ore_volume(match.group('ore_type'))
-                                total_volume = units * volume
-                                per_char_ores[char_id][ore_name] = per_char_ores[char_id].get(ore_name, 0) + total_volume
-                                per_char_m3[char_id] = per_char_m3.get(char_id, 0) + total_volume
-                                combined_m3 += total_volume
-                except Exception: continue
+    # Rassemble et retourne les données de minage agrégées sur N jours pour l'export.
+    # Dérivé du passage journalier : une seule lecture des logs, filtrée par timestamp
+    # de ligne (le mtime seul comptait des lignes plus vieilles que la période demandée)
+    def _gather_history_data(self, days: int):
+        per_char_daily, _sorted_ores, _sorted_dates, days = self._gather_daily_history_data(days)
+        per_char_ores, per_char_m3, combined_m3 = self._aggregate_history(per_char_daily)
         return per_char_ores, per_char_m3, combined_m3, days
 
     # Rassemble les données de minage groupées par jour et par personnage pour l'export journalier
@@ -2435,6 +2348,8 @@ class MiningDashboard:
         except ValueError: days = HISTORY_DAYS
 
         threshold = datetime.now() - timedelta(days=days)
+        # log dates are "YYYY-MM-DD" so lexicographic compare == chronological compare
+        threshold_date = threshold.strftime("%Y-%m-%d")
         per_char_daily: Dict[str, Dict[str, Dict[str, float]]] = {}
         all_ore_names = set()
         all_dates = set()
@@ -2453,18 +2368,21 @@ class MiningDashboard:
                                 ts_match = LOG_TIMESTAMP.match(line)
                                 if ts_match: date_str = ts_match.group(1).replace(".", "-")
                                 else: continue
-                                
+                                if date_str < threshold_date: continue
+
                                 units = float(match.group('amount').replace(",", ""))
                                 volume, ore_name = self.get_ore_volume(match.group('ore_type'))
                                 total_volume = units * volume
-                                
+
                                 all_ore_names.add(ore_name)
                                 all_dates.add(date_str)
-                                
+
                                 if date_str not in per_char_daily[char_id]:
                                     per_char_daily[char_id][date_str] = {}
                                 per_char_daily[char_id][date_str][ore_name] = per_char_daily[char_id][date_str].get(ore_name, 0) + total_volume
-                except Exception: continue
+                except Exception as e:
+                    print(f"[warn] history: could not read {log_file}: {e}")
+                    continue
 
         sorted_dates = sorted(all_dates)
         sorted_ores = sorted(all_ore_names)
@@ -2768,8 +2686,9 @@ class MiningDashboard:
 
     # Génère un fichier Excel complet avec tous les onglets (résumé, journalier, pivot)
     def _export_full(self, days: int) -> str:
-        per_char_ores, per_char_m3, combined_m3, days_used = self._gather_history_data(days)
-        per_char_daily, sorted_ores_daily, sorted_dates, _ = self._gather_daily_history_data(days)
+        # single log pass: summary data is aggregated from the daily gather
+        per_char_daily, sorted_ores_daily, sorted_dates, days_used = self._gather_daily_history_data(days)
+        per_char_ores, per_char_m3, combined_m3 = self._aggregate_history(per_char_daily)
         filepath = self._get_export_path("full", days_used)
         wb = Workbook(); ws = wb.active; ws.title = "Summary"
         self._style_eve_sheet(ws)
@@ -2929,16 +2848,18 @@ class MiningDashboard:
         clean_lower = clean_name.lower()
         for base_ore, volume in ORE_VOLUMES.items():
             if base_ore.lower() in clean_lower: return volume, clean_name
+        # unknown name: 1.0 m³ is a guess — surface it instead of failing silently
+        # (lru_cache means this prints once per unique name)
+        print(f"[warn] unknown ore '{clean_name}', assuming 1.0 m³/unit")
         return 1.0, clean_name
 
     # Restaure les paramètres sauvegardés (thème, transparence, topmost) depuis la config
     def _apply_saved_app_settings(self):
-        global DOCS, CRIT_SOUND_FILE, UPDATE_INTERVAL_MS, HISTORY_DAYS, CRITICAL_HIT_KEYWORD, PLAY_CRIT_SOUND, WIN_ALPHA, SDE_AUTO_UPDATE
+        global DOCS, CRIT_SOUND_FILE, HISTORY_DAYS, CRITICAL_HIT_KEYWORD, PLAY_CRIT_SOUND, WIN_ALPHA, SDE_AUTO_UPDATE
         app_settings = self.app_config.get("app_settings", {})
         if not app_settings: return
         if "docs_path" in app_settings: DOCS = app_settings["docs_path"]
         if "crit_sound_file" in app_settings: CRIT_SOUND_FILE = app_settings["crit_sound_file"]
-        if "update_interval_ms" in app_settings: UPDATE_INTERVAL_MS = max(250, int(app_settings["update_interval_ms"]))
         if "history_days" in app_settings: HISTORY_DAYS = max(1, int(app_settings["history_days"]))
         if "crit_keyword" in app_settings: CRITICAL_HIT_KEYWORD = app_settings["crit_keyword"]
         if "play_crit_sound" in app_settings: PLAY_CRIT_SOUND = app_settings["play_crit_sound"]
@@ -2956,6 +2877,8 @@ class MiningDashboard:
         _sde_auto_update_result = None
         if result is None:
             return
+        # Drop lookups cached against the old ore tables
+        self.get_ore_volume.cache_clear()
         old_count = len(_DEFAULT_ORE_VOLUMES)
         new_count = int(result.get("ore_count", 0))
         new_ores = set(result.get("ore_volumes", {}).keys()) - set(_DEFAULT_ORE_VOLUMES.keys())
@@ -3023,35 +2946,9 @@ class MiningDashboard:
             return f"{w}x{self._full_height}+{x}+{y}"
         return self.root.winfo_geometry()
 
-    def _on_threat_update(self, neuts: int, friends: int) -> None:
-        """Called from ThreatWatcher thread — schedules UI update on main thread."""
-        self.root.after(0, self._apply_threat_counts, neuts, friends)
-
-    def _apply_threat_counts(self, neuts: int, friends: int) -> None:
-        """Runs on main thread. Always updates labels; sound only when session active."""
-        if hasattr(self, 'neuts_lbl'):
-            self.neuts_lbl.config(text=f"Neuts: {neuts}")
-        if hasattr(self, 'friends_lbl'):
-            self.friends_lbl.config(text=f"Friends: {friends}")
-        if neuts > 0 and getattr(self, '_alert_enabled', False):
-            _sound = self.get_resource_path("alert_hostile.wav")
-            if os.path.exists(_sound):
-                try:
-                    winsound.PlaySound(_sound, winsound.SND_FILENAME | winsound.SND_ASYNC)
-                except Exception:
-                    pass
-
-
-    def _sync_threat_watcher_pause(self) -> None:
-        """Enable alerts when any session is active; disable when all stopped."""
-        any_active = any(t.session_active for t in self.all_characters.values())
-        self._alert_enabled = any_active
-
     # Fermeture propre : sauvegarde la géométrie/config, arrête le tray et quitte
     def on_close(self) -> None:
         self.update_loop_running = False
-        if self.threat_watcher is not None:
-            self.threat_watcher.stop()
         obs = getattr(self, '_gamelog_observer', None)
         if obs is not None:
             try:
@@ -3112,16 +3009,50 @@ class MiningDashboard:
                         if new_data:
                             self._process_log_data(tracker, new_data)
                         tracker.log_pos = new_pos
-                except Exception: pass
+                except Exception as e:
+                    print(f"[error] update_loop: reading {tracker.log_path}: {e}")
             self._update_ui_labels()
-        except Exception: pass
+        except Exception as e:
+            print(f"[error] update_loop: {e}")
         # No reschedule here — _GamelogHandler.on_modified/on_created calls
         # root.after(0, self.update_loop) whenever a gamelog file changes
+
+    # (Re)démarre l'observateur watchdog sur le dossier Gamelogs courant.
+    # Appelé au démarrage et quand le chemin change dans la config
+    def _start_gamelog_observer(self) -> None:
+        obs = getattr(self, "_gamelog_observer", None)
+        if obs is not None:
+            try:
+                obs.stop()
+                obs.join(timeout=2.0)
+            except Exception as e:
+                print(f"[error] _start_gamelog_observer: stopping old observer: {e}")
+        self._gamelog_observer = None
+        gamelog_dir = os.path.dirname(os.path.expanduser(DOCS))
+        if not os.path.isdir(gamelog_dir):
+            print(f"[warn] gamelog folder not found: {gamelog_dir} — falling back to slow polling")
+            return
+        try:
+            handler = _GamelogHandler(self)
+            self._gamelog_observer = Observer()
+            self._gamelog_observer.schedule(handler, gamelog_dir, recursive=False)
+            self._gamelog_observer.start()
+        except Exception as e:
+            self._gamelog_observer = None
+            print(f"[error] _start_gamelog_observer: watchdog failed on {gamelog_dir}: {e}")
+
+    # Filet de sécurité : sondage lent (5 s) uniquement quand le watchdog est indisponible
+    def _fallback_poll_tick(self) -> None:
+        if not self.update_loop_running:
+            return
+        if self._gamelog_observer is None:
+            self.update_loop()
+        self.root.after(5000, self._fallback_poll_tick)
 
     # Auto-start a session when the first mine event is detected without user clicking START
     def _auto_start_session(self, tracker: CharacterTracker) -> None:
         tracker.session_active = True
-        tracker.session_start_time = time.time()
+        tracker.session_start_time = time.monotonic()
         if not tracker.ore_summary:
             tracker.session_start_m3 = tracker.total_m3
             tracker.session_elapsed_offset = 0.0
@@ -3132,26 +3063,26 @@ class MiningDashboard:
             if rate > 0:
                 w['actual'].config(text=f"◉ Actual: {rate:.2f} m3/s ({rate * 3600:,.0f} m3/hr)")
         self._refresh_start_all_btn()
-        self._sync_threat_watcher_pause()
 
     # Parse les lignes de log EVE pour extraire minage normal, critique, compression et résidu
     def _process_log_data(self, tracker: CharacterTracker, data: str) -> None:
-        crit_processed = False
-        last_mined_volume = 0.0
-        last_mined_ore = "Unknown"
-
         for line in data.splitlines():
             line_lower = line.lower()
 
-            # notify-based auto-pause (cargo full, etc.) — only when session is already running
+            # notify-based auto-pause (cargo full, etc.) — only when session is already running.
+            # continue (not return): the caller advances log_pos past this whole chunk, so
+            # bailing out here would silently drop any mining lines that follow the pause line
             if tracker.session_active and "(notify)" in line_lower:
                 matched = [kw for kw in AUTO_PAUSE_KEYWORDS if kw.lower() in line_lower]
+                # cargo-full events are ignored when the per-char Auto-Stop toggle is OFF
+                if matched and tracker.char_id in self._auto_stop_disabled:
+                    matched = [kw for kw in matched if CARGO_FULL_KEYWORD not in kw.lower()]
                 if matched:
-                        tracker.session_elapsed_offset += time.time() - tracker.session_start_time
-                        tracker.session_active = False
-                        if tracker.char_id in self.char_widgets:
-                            self.char_widgets[tracker.char_id]['start_stop_btn'].config(text="▶ START", fg=GREEN)
-                        return
+                    tracker.session_elapsed_offset += time.monotonic() - tracker.session_start_time
+                    tracker.session_active = False
+                    if tracker.char_id in self.char_widgets:
+                        self.char_widgets[tracker.char_id]['start_stop_btn'].config(text="▶ START", fg=GREEN)
+                    continue
 
             # compression — only meaningful inside an active session
             if tracker.session_active:
@@ -3159,7 +3090,12 @@ class MiningDashboard:
                 if compression_match:
                     ore_type = compression_match.group('ore_type')
                     compressed_amount = float(compression_match.group('amount').replace(",", ""))
-                    compression_ratio = COMPRESSION_RATIOS.get(ore_type, 100)
+                    compression_ratio = COMPRESSION_RATIOS.get(ore_type)
+                    if compression_ratio is None:
+                        compression_ratio = 100
+                        if ore_type not in self._warned_unknown:
+                            self._warned_unknown.add(ore_type)
+                            print(f"[warn] unknown compression ratio for '{ore_type}', assuming 100:1")
                     original_units = compressed_amount * compression_ratio
                     volume_per_unit, ore_name = self.get_ore_volume(ore_type)
                     total_raw_volume = original_units * volume_per_unit
@@ -3183,10 +3119,10 @@ class MiningDashboard:
                 now_mono = time.monotonic()
                 tracker.last_mine_mono = now_mono
                 tracker._rate_window.append((now_mono, total_volume))
-                last_mined_volume = volume
-                last_mined_ore = ore_name
+                tracker.last_mined_volume = volume
+                tracker.last_mined_ore = ore_name
 
-            if CRITICAL_HIT_KEYWORD in line and not crit_processed:
+            if CRITICAL_HIT_KEYWORD in line:
                 crit_match = CRIT_MINE_PATTERN.search(line)
                 if crit_match:
                     if not tracker.session_active:
@@ -3200,56 +3136,78 @@ class MiningDashboard:
                     tracker.ore_summary[ore_name] = tracker.ore_summary.get(ore_name, 0) + total_volume
                     tracker.crit_count += 1
                     tracker.crit_m3 += total_volume
-                    crit_processed = True
                     self.trigger_crit_alert()
                     now_mono = time.monotonic()
                     tracker.last_mine_mono = now_mono
                     tracker._rate_window.append((now_mono, total_volume))
-                    last_mined_volume = volume
-                    last_mined_ore = ore_name
+                    tracker.last_mined_volume = volume
+                    tracker.last_mined_ore = ore_name
 
+            # residue state lives on the tracker so a residue line at the start of a
+            # chunk still pairs with the mine event that ended the previous chunk
             residue_match = RESIDUE_PATTERN.search(line)
-            if residue_match and last_mined_volume > 0:
+            if residue_match and tracker.last_mined_volume > 0:
                 units = float(residue_match.group('amount').replace(",", ""))
-                total_volume = units * last_mined_volume
+                total_volume = units * tracker.last_mined_volume
                 tracker.total_residue_m3 += total_volume
-                tracker.residue_summary[last_mined_ore] = tracker.residue_summary.get(last_mined_ore, 0) + total_volume
+                tracker.residue_summary[tracker.last_mined_ore] = tracker.residue_summary.get(tracker.last_mined_ore, 0) + total_volume
+
+    # Applique .config() seulement si une option a réellement changé — évite de
+    # repeindre tous les widgets à chaque tick de 1 s quand rien ne bouge
+    @staticmethod
+    def _cfg(widget, **options) -> None:
+        cache = getattr(widget, "_cfg_cache", None)
+        if cache is None:
+            cache = widget._cfg_cache = {}
+        changed = {k: v for k, v in options.items() if cache.get(k) != v}
+        if changed:
+            cache.update(changed)
+            widget.config(**changed)
+
+    # Redessine la barre cargo seulement si pct/couleur/largeur ont changé
+    def _draw_cargo_bar(self, w: Dict, pct: float, bar_color=None) -> None:
+        canvas = w['cargo_canvas']
+        key = (round(pct, 3), bar_color or CYAN, canvas.winfo_width())
+        if w.get('_last_bar') != key:
+            w['_last_bar'] = key
+            draw_neon_bar(canvas, pct, bar_color=bar_color)
 
     # Met à jour tous les labels, barres cargo et stats de débit de l'interface
     def _update_ui_labels(self) -> None:
         char_widgets = self.char_widgets  # Local reference for faster lookup
         has_webhook = self._is_valid_webhook_url()
+        cfg = self._cfg
         
         for char_id, tracker in self.characters.items():
             if char_id not in char_widgets: continue
             w = char_widgets[char_id]
             
-            w['crit'].config(text=f"Crit Bonus: {tracker.crit_m3:,.1f} m³ ({tracker.crit_count})")
+            cfg(w['crit'], text=f"Crit Bonus: {tracker.crit_m3:,.1f} m³ ({tracker.crit_count})")
             session_m3 = tracker.total_m3 - tracker.session_start_m3
-            w['ore'].config(text=f"Total: {session_m3:,.1f} m3")
-            w['residue'].config(text=f"Residue: {tracker.total_residue_m3:,.1f} m3")
-    
+            cfg(w['ore'], text=f"Total: {session_m3:,.1f} m3")
+            cfg(w['residue'], text=f"Residue: {tracker.total_residue_m3:,.1f} m3")
+
             ore_summary = tracker.ore_summary
             if ore_summary:
                 summary = "\n".join([f"{ore_name}: {volume:,.1f} m3" for ore_name, volume in ore_summary.items()])
             else:
                 summary = "Waiting..."
-            w['summary'].config(text=summary)
+            cfg(w['summary'], text=summary)
     
             has_data = bool(ore_summary)
             if has_data:
-                w['copy_btn'].config(state="normal", fg=GOLD)
+                cfg(w['copy_btn'], state="normal", fg=GOLD)
                 w['copy_tip'].update_text("Copy session report to clipboard")
                 if has_webhook:
-                    w['send_btn'].config(state="normal", fg=CYAN)
+                    cfg(w['send_btn'], state="normal", fg=CYAN)
                     w['send_tip'].update_text("Send session report to Discord webhook")
                 else:
-                    w['send_btn'].config(state="disabled", fg=DIM)
+                    cfg(w['send_btn'], state="disabled", fg=DIM)
                     w['send_tip'].update_text("No webhook URL configured \u2014 set it in \u2699 Config")
             else:
-                w['copy_btn'].config(state="disabled", fg=DIM)
+                cfg(w['copy_btn'], state="disabled", fg=DIM)
                 w['copy_tip'].update_text("No mining data yet \u2014 start mining to enable")
-                w['send_btn'].config(state="disabled", fg=DIM)
+                cfg(w['send_btn'], state="disabled", fg=DIM)
                 if not has_webhook: w['send_tip'].update_text("No mining data and no webhook URL configured")
                 else: w['send_tip'].update_text("No mining data yet \u2014 start mining to enable")
 
@@ -3258,9 +3216,9 @@ class MiningDashboard:
 
             if capacity > 0:
                 pct = min(1.0, current / capacity)
-                w['cargo_text'].config(text=f"Cargo: {current:,.0f} / {capacity:,.0f} m3 ({int(pct*100)}%)")
+                cfg(w['cargo_text'], text=f"Cargo: {current:,.0f} / {capacity:,.0f} m3 ({int(pct*100)}%)")
                 bar_color = RED if pct >= 1.0 else CYAN
-                draw_neon_bar(w['cargo_canvas'], pct, bar_color=bar_color)
+                self._draw_cargo_bar(w, pct, bar_color=bar_color)
 
                 rate = tracker.get_total_theoretical_m3_per_sec()
                 if rate > 0 and pct < 1.0:
@@ -3272,23 +3230,23 @@ class MiningDashboard:
 
                     if cycle_time > 0:
                         cycles_left = seconds_left / cycle_time
-                        w['cycles_label'].config(text=f"Full in: ~{cycles_left:.1f} cycles ({time_str})")
-                    else: w['cycles_label'].config(text=f"Full in: {time_str}")
-                elif pct >= 1.0: w['cycles_label'].config(text="Full in: FULL")
-                else: w['cycles_label'].config(text="Full in: --")
+                        cfg(w['cycles_label'], text=f"Full in: ~{cycles_left:.1f} cycles ({time_str})")
+                    else: cfg(w['cycles_label'], text=f"Full in: {time_str}")
+                elif pct >= 1.0: cfg(w['cycles_label'], text="Full in: FULL")
+                else: cfg(w['cycles_label'], text="Full in: --")
             else:
-                w['cargo_text'].config(text=f"Cargo: {current:,.0f} m3 (No Cap Set)")
-                draw_neon_bar(w['cargo_canvas'], 0)
-                w['cycles_label'].config(text="Full in: (Set Capacity in Config)")
+                cfg(w['cargo_text'], text=f"Cargo: {current:,.0f} m3 (No Cap Set)")
+                self._draw_cargo_bar(w, 0)
+                cfg(w['cycles_label'], text="Full in: (Set Capacity in Config)")
 
             self._update_rate_stats(char_id, tracker, w)
 
             # ISK/hour — live ESI-priced value estimate
             isk_per_hour = self._get_isk_per_hour(tracker)
             if isk_per_hour is not None:
-                w['isk'].config(text=f"◈ Value: {isk_per_hour / 1_000_000:.2f} M ISK/h")
+                cfg(w['isk'], text=f"◈ Value: {isk_per_hour / 1_000_000:.2f} M ISK/h")
             else:
-                w['isk'].config(text=self._get_isk_status_hint(tracker))
+                cfg(w['isk'], text=self._get_isk_status_hint(tracker))
 
         # ── START ALL / STOP ALL button sync ───────────────────────────────────
         self._refresh_start_all_btn()
@@ -3308,9 +3266,9 @@ class MiningDashboard:
                 h = int(dur // 3600)
                 m = int((dur % 3600) // 60)
                 s = int(dur % 60)
-                lbl.config(text=f"{h:02d}:{m:02d}:{s:02d}")
+                self._cfg(lbl, text=f"{h:02d}:{m:02d}:{s:02d}")
             else:
-                lbl.config(text="--:--:--")
+                self._cfg(lbl, text="--:--:--")
 
         # ── Fleet summary labels ────────────────────────────────────────────
         if self._fleet_total_lbl:
@@ -3340,19 +3298,19 @@ class MiningDashboard:
                     fleet_isk += isk_h
                     has_isk = True
 
-            self._fleet_total_lbl.config(text=f"Total: {fleet_m3:,.1f} m3")
+            self._cfg(self._fleet_total_lbl, text=f"Total: {fleet_m3:,.1f} m3")
             if fleet_theo > 0:
-                self._fleet_theo_lbl.config(text=f"◈ Theoretical: {fleet_theo:.2f} m3/s ({fleet_theo * 3600:,.0f} m3/hr)", fg=WHITE)
+                self._cfg(self._fleet_theo_lbl, text=f"◈ Theoretical: {fleet_theo:.2f} m3/s ({fleet_theo * 3600:,.0f} m3/hr)", fg=WHITE)
             else:
-                self._fleet_theo_lbl.config(text="◈ Theoretical: -- m3/s", fg=DIM)
+                self._cfg(self._fleet_theo_lbl, text="◈ Theoretical: -- m3/s", fg=DIM)
             if fleet_actual > 0:
-                self._fleet_actual_lbl.config(text=f"◉ Actual: {fleet_actual:.2f} m3/s ({fleet_actual * 3600:,.0f} m3/hr)", fg=WHITE)
+                self._cfg(self._fleet_actual_lbl, text=f"◉ Actual: {fleet_actual:.2f} m3/s ({fleet_actual * 3600:,.0f} m3/hr)", fg=WHITE)
             else:
-                self._fleet_actual_lbl.config(text="◉ Actual: 0.00 m3/s", fg=DIM)
+                self._cfg(self._fleet_actual_lbl, text="◉ Actual: 0.00 m3/s", fg=DIM)
             if has_isk:
-                self._fleet_isk_lbl.config(text=f"◈ Fleet: {fleet_isk / 1_000_000:.2f} M ISK/h", fg=GOLD)
+                self._cfg(self._fleet_isk_lbl, text=f"◈ Fleet: {fleet_isk / 1_000_000:.2f} M ISK/h", fg=GOLD)
             else:
-                self._fleet_isk_lbl.config(text="◈ Fleet: -- ISK/h", fg=DIM)
+                self._cfg(self._fleet_isk_lbl, text="◈ Fleet: -- ISK/h", fg=DIM)
 
     # Joue le son d'alerte critique et envoie une notification bureau si disponible
     def trigger_crit_alert(self) -> None:
@@ -3407,7 +3365,7 @@ class MiningDashboard:
         for char_id, tracker in self.characters.items():
             if (tracker.session_active and tracker.last_mine_mono > 0
                     and now_mono - tracker.last_mine_mono > self._get_pause_timeout(tracker)):
-                tracker.session_elapsed_offset += time.time() - tracker.session_start_time
+                tracker.session_elapsed_offset += time.monotonic() - tracker.session_start_time
                 tracker.session_active = False
                 tracker.last_mine_mono = 0.0
                 if char_id in self.char_widgets:
@@ -3469,8 +3427,9 @@ class MiningDashboard:
         with _esi_cache_lock:
             prices = dict(_esi_prices)
         missing = next(
-            (name for name in tracker.ore_summary if ORE_TYPE_IDS.get(name) is None
-             or prices.get(ORE_TYPE_IDS[name], 0) == 0),
+            (name for name in tracker.ore_summary
+             if _lookup_ore_type_id(name) is None
+             or prices.get(_lookup_ore_type_id(name), 0) == 0),
             None
         )
         if missing:
@@ -3486,28 +3445,9 @@ class MiningDashboard:
 
         total_isk = 0.0
         total_m3 = 0.0
-        # Full suffix list — handles both "II-Grade" and shorthand "II" from some log formats
-        grade_suffixes = [
-            " IV-Grade", " III-Grade", " II-Grade", " 0-Grade",
-            " IV", " III", " II", " I",
-        ]
 
         for ore_name, ore_m3 in tracker.ore_summary.items():
-            type_id = ORE_TYPE_IDS.get(ore_name)
-            if type_id is None:
-                base_name = ore_name
-                for suffix in grade_suffixes:
-                    if ore_name.endswith(suffix):
-                        base_name = ore_name[: -len(suffix)]
-                        break
-                type_id = ORE_TYPE_IDS.get(base_name)
-            if type_id is None:
-                # Fuzzy: find any known ore name that appears inside this ore_name
-                ore_lower = ore_name.lower()
-                for known_name, tid in ORE_TYPE_IDS.items():
-                    if known_name.lower() in ore_lower:
-                        type_id = tid
-                        break
+            type_id = _lookup_ore_type_id(ore_name)
             if type_id is None:
                 continue
 
@@ -3537,7 +3477,7 @@ class MiningDashboard:
 
         if tracker.session_active:
             is_resume = bool(tracker.ore_summary)
-            tracker.session_start_time = time.time()
+            tracker.session_start_time = time.monotonic()
             if not is_resume:
                 tracker.session_start_m3 = tracker.total_m3
                 tracker.session_elapsed_offset = 0.0
@@ -3549,7 +3489,8 @@ class MiningDashboard:
                         backlog = f.read()
                         if backlog: self._process_log_data(tracker, backlog)
                         tracker.log_pos = f.tell()
-                except Exception: pass
+                except Exception as e:
+                    print(f"[error] toggle_session: reading backlog from {tracker.log_path}: {e}")
 
             if not tracker.session_active:
                 widgets['start_stop_btn'].config(text="▶ START", fg=GREEN)
@@ -3559,9 +3500,8 @@ class MiningDashboard:
             rate = tracker.get_total_theoretical_m3_per_sec()
             if rate > 0: widgets['actual'].config(text=f"◉ Actual: {rate:.2f} m3/s ({rate * 3600:,.0f} m3/hr)")
         else:
-            tracker.session_elapsed_offset += time.time() - tracker.session_start_time
+            tracker.session_elapsed_offset += time.monotonic() - tracker.session_start_time
             widgets['start_stop_btn'].config(text="▶ START", fg=GREEN)
-        self._sync_threat_watcher_pause()
 
     # Remet le cargo à zéro pour simuler un déchargement en station
     def empty_cargo(self, char_id: str):
@@ -3586,10 +3526,12 @@ class MiningDashboard:
         tracker.compression_log = {}
         tracker.total_residue_m3 = 0.0
         tracker.residue_summary = {}
-        tracker.session_start_time = time.time()
+        tracker.session_start_time = time.monotonic()
         tracker.session_start_m3 = 0.0
         tracker.session_elapsed_offset = 0.0
         tracker.last_mine_mono = 0.0
+        tracker.last_mined_volume = 0.0
+        tracker.last_mined_ore = "Unknown"
         tracker._rate_window.clear()
 
         widgets['crit'].config(text="Crit Bonus: 0.0 m³")
@@ -3603,7 +3545,6 @@ class MiningDashboard:
         widgets['send_btn'].config(state="disabled", fg=DIM)
         if not self._is_valid_webhook_url(): widgets['send_tip'].update_text("No mining data and no webhook URL configured")
         else: widgets['send_tip'].update_text("No mining data yet \u2014 start mining to enable")
-        self._sync_threat_watcher_pause()
 
     # Charge les profils de vaisseau (modules, drones, implants, cargo) depuis la config JSON
     def load_ship_configs(self):
@@ -3901,7 +3842,7 @@ class MiningDashboard:
                     except ValueError: pass
             
             has_implant = implant_var.get()
-            if has_implant and module_m3_per_sec > 0: module_m3_per_sec *= 1.054 
+            if has_implant and module_m3_per_sec > 0: module_m3_per_sec *= IMPLANT_YIELD_MULT
             total_m3_per_sec = module_m3_per_sec
 
             drone_count = 0
@@ -3946,12 +3887,18 @@ class MiningDashboard:
         current_profile.trace_add('write', on_profile_change)
 
         def save_current_profile_to_tracker():
+            # tolerate non-numeric text: this also runs from the profile-switch
+            # trace callback, where an uncaught ValueError would leave the
+            # dropdown and the tracker pointing at different profiles
+            def _safe_float(s: str) -> float:
+                try: return float(s) if s else 0.0
+                except ValueError: return 0.0
             modules = []
             for mv in module_vars:
                 mod = MiningModule(
                     name=mv['name'].get(),
-                    yield_per_cycle=float(mv['yield'].get()) if mv['yield'].get() else 0.0,
-                    cycle_time=float(mv['cycle'].get()) if mv['cycle'].get() else 0.0,
+                    yield_per_cycle=_safe_float(mv['yield'].get()),
+                    cycle_time=_safe_float(mv['cycle'].get()),
                     enabled=mv['enabled'].get()
                 )
                 modules.append(mod)
@@ -4202,11 +4149,11 @@ class MiningDashboard:
     # Calcule et affiche le débit réel (m³/s) et la durée de session formatée
     def _update_rate_stats(self, char_id: str, tracker: CharacterTracker, widgets: Dict):
         theoretical_m3_per_sec = tracker.get_total_theoretical_m3_per_sec()
-        if theoretical_m3_per_sec > 0: widgets['theoretical'].config(text=f"◈ Theoretical: {theoretical_m3_per_sec:.2f} m3/s ({theoretical_m3_per_sec * 3600:,.0f} m3/hr)")
-        else: widgets['theoretical'].config(text="◈ Theoretical: -- m3/s (configure ship)")
+        if theoretical_m3_per_sec > 0: self._cfg(widgets['theoretical'], text=f"◈ Theoretical: {theoretical_m3_per_sec:.2f} m3/s ({theoretical_m3_per_sec * 3600:,.0f} m3/hr)")
+        else: self._cfg(widgets['theoretical'], text="◈ Theoretical: -- m3/s (configure ship)")
 
         if not tracker.session_active:
-            widgets['actual'].config(text="◉ Actual: 0.00 m3/s (0 m3/hr)")
+            self._cfg(widgets['actual'], text="◉ Actual: 0.00 m3/s (0 m3/hr)")
             return
 
         # Rolling window: trim events older than RATE_WINDOW_SEC
@@ -4223,11 +4170,11 @@ class MiningDashboard:
             if denominator > 5:
                 actual_m3_per_sec = window_m3 / denominator
 
-        widgets['actual'].config(text=f"◉ Actual: {actual_m3_per_sec:.2f} m3/s ({actual_m3_per_sec * 3600:,.0f} m3/hr)")
+        self._cfg(widgets['actual'], text=f"◉ Actual: {actual_m3_per_sec:.2f} m3/s ({actual_m3_per_sec * 3600:,.0f} m3/hr)")
 
     # Ouvre la boîte de dialogue des paramètres : personnages, thème, sons, chemins, webhook
     def show_config_dialog(self):
-        global DOCS, UPDATE_INTERVAL_MS, HISTORY_DAYS
+        global DOCS, HISTORY_DAYS
 
         if self.config_dialog is not None and self.config_dialog.winfo_exists():
             self.config_dialog.lift()
@@ -4278,6 +4225,10 @@ class MiningDashboard:
         title_lbl.bind("<Button-1>", start_drag)
         title_lbl.bind("<B1-Motion>", do_drag)
 
+        # theme active when the dialog opened — restored if the user previews
+        # a theme then cancels (preview applies live, cancel must undo it)
+        original_theme = self.app_theme
+
         def close_dialog():
             try:
                 x, y = dialog.winfo_x(), dialog.winfo_y()
@@ -4287,6 +4238,10 @@ class MiningDashboard:
             self.config_dialog = None
             self._enable_config_icon()
             dialog.destroy()
+            if self.app_theme != original_theme:
+                apply_theme_colors(original_theme)
+                self.app_theme = original_theme
+                self.rebuild_all_ui()
 
         close_btn = tk.Label(title_bar, text="✕", fg=DIM, bg=BG_PANEL,
                              font=("Consolas", 14, "bold"), cursor="hand2")
@@ -4519,13 +4474,15 @@ class MiningDashboard:
         sde_status_label_ref[0].pack(anchor="w", pady=(2, 4))
 
         def do_sde_update():
-            global ORE_VOLUMES, COMPRESSION_RATIOS, SDE_INFO
             update_btn.config(state="disabled", text="↻  UPDATING...")
             sde_bar_frame.pack(fill="x", before=sde_status_label_ref[0])
             draw_neon_bar(sde_bar_canvas, 0)
             sde_bar_pct_label.config(text="")
 
             def run_update():
+                # global must be declared HERE (the scope that assigns) — a global
+                # statement in the enclosing function does not reach nested functions
+                global ORE_VOLUMES, COMPRESSION_RATIOS
                 try:
                     def progress(msg):
                         try:
@@ -4542,9 +4499,13 @@ class MiningDashboard:
                     _save_ore_data_cache(result)
                     ORE_VOLUMES         = {k: float(v) for k, v in result["ore_volumes"].items()}
                     COMPRESSION_RATIOS  = {k: int(v)   for k, v in result["compression_ratios"].items()}
+                    if "type_ids" in result:
+                        ORE_TYPE_IDS.update({k: int(v) for k, v in result["type_ids"].items()})
                     SDE_INFO["version"]   = result.get("sde_version", "updated")
                     SDE_INFO["updated_at"]= result.get("updated_at", "now")
                     SDE_INFO["ore_count"] = str(result.get("ore_count", len(ORE_VOLUMES)))
+                    # Drop lookups cached against the old ore tables
+                    self.get_ore_volume.cache_clear()
 
                     def on_success():
                         sde_status_var.set(f"✔ Updated! {SDE_INFO['ore_count']} ores loaded.")
@@ -4655,7 +4616,7 @@ class MiningDashboard:
 
         # ── SAVE / CANCEL ────────────────────────────────────────────────
         def save_and_close():
-            global DOCS, UPDATE_INTERVAL_MS, HISTORY_DAYS, PLAY_CRIT_SOUND, WIN_ALPHA, SDE_AUTO_UPDATE
+            global DOCS, HISTORY_DAYS, PLAY_CRIT_SOUND, WIN_ALPHA, SDE_AUTO_UPDATE
             try:
                 new_history = int(history_var.get())
                 if new_history < 1: new_history = 1
@@ -4669,7 +4630,14 @@ class MiningDashboard:
                 selected_chars  = [cid for cid, v in char_vars.items() if v.get()]
                 self.save_visible_characters(selected_chars)
 
+                docs_changed     = docs_var.get().strip() != DOCS
                 DOCS             = docs_var.get().strip()
+                if docs_changed:
+                    # new gamelog folder: re-point the watchdog and drop stale file caches,
+                    # otherwise live updates silently keep watching the old path
+                    self._glob_cache_time = 0.0
+                    self._latest_log_index = None
+                    self._start_gamelog_observer()
                 HISTORY_DAYS     = new_history
                 PLAY_CRIT_SOUND  = crit_sound_var.get()
                 SDE_AUTO_UPDATE  = sde_auto_var.get()
@@ -4678,8 +4646,8 @@ class MiningDashboard:
 
                 self.app_config["app_settings"] = {
                     "docs_path": DOCS, "crit_sound_file": CRIT_SOUND_FILE,
-                    "update_interval_ms": UPDATE_INTERVAL_MS, "history_days": HISTORY_DAYS,
-                    "max_modules": MAX_MODULES, "play_crit_sound": PLAY_CRIT_SOUND,
+                    "history_days": HISTORY_DAYS,
+                    "play_crit_sound": PLAY_CRIT_SOUND,
                     "sde_auto_update": SDE_AUTO_UPDATE,
                     "win_alpha": WIN_ALPHA,
                 }
