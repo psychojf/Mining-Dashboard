@@ -48,11 +48,45 @@ try:
 except ImportError:
     HAS_PYSTRAY = False
 
+# ---------------------------------------------------------------------------
+# WRITABLE PATHS
+# Config and caches live next to the .exe (or next to this script when run from
+# source) — never in the current working directory. Launching from a shortcut,
+# the Start menu or a different drive sets an arbitrary CWD, which made the app
+# start with a blank config and then write a new one somewhere else entirely.
+# ---------------------------------------------------------------------------
+def _app_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+APP_DIR = _app_dir()
+
+def _app_path(filename: str) -> str:
+    return os.path.join(APP_DIR, filename)
+
+# Atomic JSON write: serialise to <path>.tmp, fsync, then os.replace(). A crash
+# or power loss mid-write can no longer leave a truncated/empty file behind —
+# for mining_config.json that meant losing every ship profile and window layout.
+def _atomic_write_json(path: str, data, **dump_kwargs) -> None:
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, **dump_kwargs)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            if os.path.exists(tmp): os.remove(tmp)
+        except OSError: pass
+        raise
+
 # config defaults
 DOCS = os.path.expanduser(r"~\Documents\EVE\logs\Gamelogs\*")
 CRIT_SOUND_FILE = "alert_crit.wav"
 PLAY_CRIT_SOUND = True  # Default to playing the sound
-CONFIG_FILE = "mining_config.json"
+CONFIG_FILE = _app_path("mining_config.json")
 HISTORY_DAYS = 60
 CRITICAL_HIT_KEYWORD = "Critical mining success"
 MAX_MODULES = 5  # Maximum mining modules per ship
@@ -233,7 +267,7 @@ def draw_neon_bar(canvas, pct, bar_color=None, glow=True, segments=True):
 # ORE / ICE / GAS DATA  (SDE-aware, auto-updatable)
 # Source: EVE Online SDE build 3386912 (Jun 10, 2026)
 # ---------------------------------------------------------------------------
-ORE_DATA_CACHE_FILE = "ore_data_cache.json"
+ORE_DATA_CACHE_FILE = _app_path("ore_data_cache.json")
 SDE_LATEST_URL = "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip"
 SDE_ASTEROID_CATEGORY_ID = 25
 SDE_GAS_GROUP_ID = 711
@@ -410,8 +444,7 @@ def _load_ore_data_from_cache():
 # Sauvegarde les données de minerais analysées dans le fichier cache JSON
 def _save_ore_data_cache(data):
     try:
-        with open(ORE_DATA_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        _atomic_write_json(ORE_DATA_CACHE_FILE, data, indent=2, ensure_ascii=False)
     except Exception as e: print(f"Warning: could not save ore data cache: {e}")
 
 def _load_esi_price_cache() -> bool:
@@ -458,8 +491,7 @@ def _save_esi_price_cache(prices: Dict[int, float], resolved_ids: Optional[Dict[
                     data["resolved_type_ids"] = old["resolved_type_ids"]
             except Exception:
                 pass
-        with open(ESI_PRICE_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f)
+        _atomic_write_json(ESI_PRICE_CACHE_FILE, data)
     except Exception as e:
         print(f"Warning: could not save ESI price cache: {e}")
 
@@ -704,7 +736,7 @@ SDE_INFO: Dict[str, str] = {"version": "built-in", "updated_at": "n/a", "ore_cou
 # ---------------------------------------------------------------------------
 # ESI PRICE INFRASTRUCTURE
 # ---------------------------------------------------------------------------
-ESI_PRICE_CACHE_FILE = "esi_price_cache.json"
+ESI_PRICE_CACHE_FILE = _app_path("esi_price_cache.json")
 ESI_PRICE_CACHE_TTL_HOURS = 24
 
 # Fallback type IDs for common ores used when SDE cache has no type_ids.
@@ -1315,6 +1347,19 @@ class MiningDashboard:
         self.app_config["visible_characters"] = visible_char_ids
         self.save_config()
         self.characters = self.get_visible_characters()
+        # A char enabled mid-run still carries the log_pos captured at startup.
+        # Without re-seeking to EOF, update_loop replays every line written to
+        # its gamelog since launch — inflating the session totals and firing one
+        # crit alert per historical crit line.
+        for cid in newly_added:
+            tracker = self.all_characters.get(cid)
+            if tracker is None:
+                continue
+            tracker.log_path = self._get_latest_log_for_char(cid)
+            try:
+                tracker.log_pos = os.path.getsize(tracker.log_path) if tracker.log_path else 0
+            except OSError:
+                tracker.log_pos = 0
         for cid in newly_added:
             self.hidden_windows.add(cid)
         if newly_added:
@@ -1688,7 +1733,7 @@ class MiningDashboard:
     def get_resource_path(self, relative_path):
         if hasattr(sys, '_MEIPASS'):
             return os.path.join(sys._MEIPASS, relative_path)
-        return os.path.join(os.path.abspath("."), relative_path)
+        return os.path.join(APP_DIR, relative_path)
 
     # Initialise l'icône de la barre système et son menu contextuel (pystray)
     def setup_tray(self):
@@ -2846,12 +2891,27 @@ class MiningDashboard:
         clean_name = raw_name.strip().rstrip('.')
         if clean_name in ORE_VOLUMES: return ORE_VOLUMES[clean_name], clean_name
         clean_lower = clean_name.lower()
-        for base_ore, volume in ORE_VOLUMES.items():
-            if base_ore.lower() in clean_lower: return volume, clean_name
+        # Longest base name first: "Rakovene" must not shadow "Nesosilicate
+        # Rakovene" (16.0 vs 0.5 m3/unit) when the exact name isn't in the table
+        for base_ore in sorted(ORE_VOLUMES, key=len, reverse=True):
+            if base_ore.lower() in clean_lower: return ORE_VOLUMES[base_ore], clean_name
         # unknown name: 1.0 m³ is a guess — surface it instead of failing silently
         # (lru_cache means this prints once per unique name)
         print(f"[warn] unknown ore '{clean_name}', assuming 1.0 m³/unit")
         return 1.0, clean_name
+
+    @lru_cache(maxsize=256)
+    # Resolve a compression ratio the same way get_ore_volume resolves volumes:
+    # exact key, then longest substring match. A plain COMPRESSION_RATIOS.get()
+    # missed every grade variant and silently assumed 100:1, corrupting the
+    # cargo figure by the ratio error on each compress event.
+    def get_compression_ratio(self, raw_name: str) -> Tuple[Optional[int], str]:
+        clean_name = raw_name.strip().rstrip('.')
+        if clean_name in COMPRESSION_RATIOS: return COMPRESSION_RATIOS[clean_name], clean_name
+        clean_lower = clean_name.lower()
+        for base_ore in sorted(COMPRESSION_RATIOS, key=len, reverse=True):
+            if base_ore.lower() in clean_lower: return COMPRESSION_RATIOS[base_ore], base_ore
+        return None, clean_name
 
     # Restaure les paramètres sauvegardés (thème, transparence, topmost) depuis la config
     def _apply_saved_app_settings(self):
@@ -2879,6 +2939,7 @@ class MiningDashboard:
             return
         # Drop lookups cached against the old ore tables
         self.get_ore_volume.cache_clear()
+        self.get_compression_ratio.cache_clear()
         old_count = len(_DEFAULT_ORE_VOLUMES)
         new_count = int(result.get("ore_count", 0))
         new_ores = set(result.get("ore_volumes", {}).keys()) - set(_DEFAULT_ORE_VOLUMES.keys())
@@ -2922,7 +2983,7 @@ class MiningDashboard:
     def load_config(self) -> Dict:
         if os.path.exists(CONFIG_FILE):
             try:
-                with open(CONFIG_FILE, "r") as f: return json.load(f)
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f: return json.load(f)
             except Exception: return {}
         return {}
 
@@ -2931,8 +2992,7 @@ class MiningDashboard:
         self.app_config["win_geom"] = self._get_full_win_geom()
         self.app_config["win_rolled_up"] = self._is_rolled_up
         try:
-            with open(CONFIG_FILE, "w") as f:
-                json.dump(self.app_config, f, indent=2)
+            _atomic_write_json(CONFIG_FILE, self.app_config, indent=2)
             return True
         except Exception as e:
             self._last_save_error = str(e)
@@ -3090,7 +3150,7 @@ class MiningDashboard:
                 if compression_match:
                     ore_type = compression_match.group('ore_type')
                     compressed_amount = float(compression_match.group('amount').replace(",", ""))
-                    compression_ratio = COMPRESSION_RATIOS.get(ore_type)
+                    compression_ratio, _ratio_src = self.get_compression_ratio(ore_type)
                     if compression_ratio is None:
                         compression_ratio = 100
                         if ore_type not in self._warned_unknown:
@@ -3242,11 +3302,13 @@ class MiningDashboard:
             self._update_rate_stats(char_id, tracker, w)
 
             # ISK/hour — live ESI-priced value estimate
-            isk_per_hour = self._get_isk_per_hour(tracker)
-            if isk_per_hour is not None:
-                cfg(w['isk'], text=f"◈ Value: {isk_per_hour / 1_000_000:.2f} M ISK/h")
-            else:
+            isk_per_hour, isk_coverage = self._get_isk_per_hour(tracker)
+            if isk_per_hour is None:
                 cfg(w['isk'], text=self._get_isk_status_hint(tracker))
+            elif isk_coverage < 0.999:
+                cfg(w['isk'], text=f"◈ Value: ~{isk_per_hour / 1_000_000:.2f} M ISK/h ({isk_coverage * 100:.0f}% priced)")
+            else:
+                cfg(w['isk'], text=f"◈ Value: {isk_per_hour / 1_000_000:.2f} M ISK/h")
 
         # ── START ALL / STOP ALL button sync ───────────────────────────────────
         self._refresh_start_all_btn()
@@ -3277,6 +3339,7 @@ class MiningDashboard:
             fleet_actual = 0.0
             fleet_isk = 0.0
             has_isk = False
+            fleet_isk_partial = False
             now_mono = time.monotonic()
             cutoff = now_mono - RATE_WINDOW_SEC
 
@@ -3293,10 +3356,12 @@ class MiningDashboard:
                         if denom > 5:
                             fleet_actual += window_m3 / denom
 
-                isk_h = self._get_isk_per_hour(tracker)
+                isk_h, isk_cov = self._get_isk_per_hour(tracker)
                 if isk_h is not None:
                     fleet_isk += isk_h
                     has_isk = True
+                    if isk_cov < 0.999:
+                        fleet_isk_partial = True
 
             self._cfg(self._fleet_total_lbl, text=f"Total: {fleet_m3:,.1f} m3")
             if fleet_theo > 0:
@@ -3308,7 +3373,8 @@ class MiningDashboard:
             else:
                 self._cfg(self._fleet_actual_lbl, text="◉ Actual: 0.00 m3/s", fg=DIM)
             if has_isk:
-                self._cfg(self._fleet_isk_lbl, text=f"◈ Fleet: {fleet_isk / 1_000_000:.2f} M ISK/h", fg=GOLD)
+                _isk_prefix = "~" if fleet_isk_partial else ""
+                self._cfg(self._fleet_isk_lbl, text=f"◈ Fleet: {_isk_prefix}{fleet_isk / 1_000_000:.2f} M ISK/h", fg=GOLD)
             else:
                 self._cfg(self._fleet_isk_lbl, text="◈ Fleet: -- ISK/h", fg=DIM)
 
@@ -3436,38 +3502,55 @@ class MiningDashboard:
             return f"◈ Value: -- ISK/h  [no price: {missing}]"
         return "◈ Value: -- ISK/h  [no price data]"
 
-    def _get_isk_per_hour(self, tracker: "CharacterTracker") -> Optional[float]:
-        """Return estimated ISK/h for the current session ore mix, or None if unavailable."""
+    def _get_isk_per_hour(self, tracker: "CharacterTracker") -> Tuple[Optional[float], float]:
+        """Estimated ISK/h for the current session ore mix.
+
+        Returns (isk_per_hour, coverage) where coverage is the fraction of the
+        session's m3 that actually carried a price. Callers must surface a
+        coverage < 1 instead of printing a confident total: roughly 1 ore in 10
+        has a type_id but no ESI price (grade variants, some ices and gases),
+        and those used to be dropped from the sum with no visible sign.
+        """
         with _esi_cache_lock:
             prices = dict(_esi_prices)
         if not prices or not tracker.ore_summary:
-            return None
+            return None, 0.0
 
         total_isk = 0.0
-        total_m3 = 0.0
+        priced_m3 = 0.0
+        session_m3 = 0.0
 
         for ore_name, ore_m3 in tracker.ore_summary.items():
+            session_m3 += ore_m3
             type_id = _lookup_ore_type_id(ore_name)
             if type_id is None:
                 continue
 
             price_per_unit = prices.get(type_id, 0.0)
-            vol_per_unit = ORE_VOLUMES.get(ore_name) or _DEFAULT_ORE_VOLUMES.get(ore_name, 0.0)
-            if vol_per_unit <= 0 or price_per_unit <= 0:
+            if price_per_unit <= 0:
                 continue
 
-            isk_per_m3 = price_per_unit / vol_per_unit
-            total_isk += ore_m3 * isk_per_m3
-            total_m3 += ore_m3
+            # get_ore_volume() resolves grade variants and any other name that
+            # isn't a verbatim ORE_VOLUMES key — exactly how the m3 was counted
+            # in the first place. The old dict lookup returned 0.0 for those and
+            # silently dropped the ore from the ISK total while still counting
+            # its volume, so the figure read low with no explanation.
+            vol_per_unit, _ = self.get_ore_volume(ore_name)
+            if vol_per_unit <= 0:
+                continue
 
-        if total_m3 <= 0:
-            return None
+            total_isk += ore_m3 * (price_per_unit / vol_per_unit)
+            priced_m3 += ore_m3
+
+        if priced_m3 <= 0:
+            return None, 0.0
 
         session_duration = tracker.get_session_active_duration()
         if session_duration < 10:
-            return None
+            return None, 0.0
 
-        return total_isk / (session_duration / 3600.0)
+        coverage = priced_m3 / session_m3 if session_m3 > 0 else 0.0
+        return total_isk / (session_duration / 3600.0), coverage
 
     # Démarre ou arrête la session de minage pour un personnage donné
     def toggle_session(self, char_id: str):
@@ -4506,6 +4589,7 @@ class MiningDashboard:
                     SDE_INFO["ore_count"] = str(result.get("ore_count", len(ORE_VOLUMES)))
                     # Drop lookups cached against the old ore tables
                     self.get_ore_volume.cache_clear()
+                    self.get_compression_ratio.cache_clear()
 
                     def on_success():
                         sde_status_var.set(f"✔ Updated! {SDE_INFO['ore_count']} ores loaded.")
@@ -4765,9 +4849,12 @@ class MiningDashboard:
         lines.append("")
         lines.append(f"Total: {total_m3:,.1f} m³")
 
-        isk_per_hour = self._get_isk_per_hour(tracker)
+        isk_per_hour, isk_coverage = self._get_isk_per_hour(tracker)
         if isk_per_hour is not None:
-            lines.append(f"Value: {isk_per_hour / 1_000_000:.2f} M ISK/h  (ESI adjusted price)")
+            if isk_coverage < 0.999:
+                lines.append(f"Value: ~{isk_per_hour / 1_000_000:.2f} M ISK/h  (ESI adjusted price, {isk_coverage * 100:.0f}% of m³ priced)")
+            else:
+                lines.append(f"Value: {isk_per_hour / 1_000_000:.2f} M ISK/h  (ESI adjusted price)")
 
         return "\n".join(lines)
 
